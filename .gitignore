@@ -1,1 +1,18 @@
+# datasets
 data/
+
+# model weights and checkpoints
+weights/
+*.pth
+
+# demo outputs and temporary artifacts
+demo_cotracker_outputs/
+demo_pair_outputs/
+demo_sampler_outputs/
+demo_pair_inputs/
+demo_*
+
+# numpy and binary artifacts
+*.npy
+*.npz
+*.ckpt
