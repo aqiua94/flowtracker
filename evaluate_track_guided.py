@@ -61,6 +61,23 @@ def tensor_to_flow_hwc(tensor):
     return tensor.detach().cpu().numpy().transpose(1, 2, 0).astype(np.float32)
 
 
+def prior_coverage(track_prior):
+    confidence = track_prior[2].detach().cpu().numpy()
+    return float((confidence > 0).mean())
+
+
+def should_use_safe_fallback(record, args):
+    if not args.safe_refinement:
+        return False, ""
+    if record["prior_coverage"] < args.min_prior_coverage:
+        return True, "low_prior_coverage"
+    if record["gate_mean"] < args.min_gate_mean:
+        return True, "low_gate_mean"
+    if record["delta_mean_abs"] > args.max_delta_mean_abs:
+        return True, "large_delta"
+    return False, ""
+
+
 def evaluate(args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -94,20 +111,32 @@ def evaluate(args):
             delta_np = tensor_to_flow_hwc(delta_flow_t)
             gate_np = gate_t.detach().cpu().numpy().astype(np.float32)
 
-            initial_error = np.linalg.norm(initial_np - gt_np, axis=2)
-            refined_error = np.linalg.norm(refined_np - gt_np, axis=2)
-            improvement = initial_error - refined_error
-
             record = {
                 "index": index,
-                "initial_epe": flow_epe(initial_np, gt_np, valid_np),
-                "refined_epe": flow_epe(refined_np, gt_np, valid_np),
-                "initial_l1": flow_l1(initial_np, gt_np, valid_np),
-                "refined_l1": flow_l1(refined_np, gt_np, valid_np),
+                "prior_coverage": prior_coverage(item["track_prior"]),
                 "delta_mean_abs": float(np.abs(delta_np).mean()),
                 "gate_mean": float(gate_np.mean()),
                 "gate_max": float(gate_np.max()),
             }
+            fallback, fallback_reason = should_use_safe_fallback(record, args)
+            if fallback:
+                refined_np = initial_np.copy()
+                delta_np = np.zeros_like(delta_np)
+
+            initial_error = np.linalg.norm(initial_np - gt_np, axis=2)
+            refined_error = np.linalg.norm(refined_np - gt_np, axis=2)
+            improvement = initial_error - refined_error
+
+            record.update(
+                {
+                    "initial_epe": flow_epe(initial_np, gt_np, valid_np),
+                    "refined_epe": flow_epe(refined_np, gt_np, valid_np),
+                    "initial_l1": flow_l1(initial_np, gt_np, valid_np),
+                    "refined_l1": flow_l1(refined_np, gt_np, valid_np),
+                    "used_fallback": fallback,
+                    "fallback_reason": fallback_reason,
+                }
+            )
             record["epe_delta"] = record["refined_epe"] - record["initial_epe"]
             records.append(record)
 
@@ -130,12 +159,17 @@ def evaluate(args):
         "checkpoint": str(args.checkpoint),
         "manifest": str(args.manifest),
         "hidden_dim": hidden_dim,
+        "safe_refinement": args.safe_refinement,
+        "min_prior_coverage": args.min_prior_coverage,
+        "min_gate_mean": args.min_gate_mean,
+        "max_delta_mean_abs": args.max_delta_mean_abs,
         "num_samples": len(records),
         "mean_initial_epe": float(initial_epes.mean()),
         "mean_refined_epe": float(refined_epes.mean()),
         "mean_epe_delta": float((refined_epes - initial_epes).mean()),
         "num_improved": int((refined_epes < initial_epes).sum()),
         "num_worse": int((refined_epes > initial_epes).sum()),
+        "num_fallback": int(sum(r["used_fallback"] for r in records)),
         "samples": records,
     }
 
@@ -158,6 +192,10 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--hidden_dim", type=int, default=None)
     parser.add_argument("--num_visualizations", type=int, default=4)
+    parser.add_argument("--safe_refinement", action="store_true", help="Fall back to initial FlowSeek flow when unsupervised safety checks fail")
+    parser.add_argument("--min_prior_coverage", type=float, default=0.0, help="Minimum nonzero track-prior confidence pixel fraction")
+    parser.add_argument("--min_gate_mean", type=float, default=0.0, help="Minimum mean refinement gate required to keep the refined flow")
+    parser.add_argument("--max_delta_mean_abs", type=float, default=float("inf"), help="Maximum mean absolute delta flow allowed before fallback")
     args = parser.parse_args()
     evaluate(args)
 

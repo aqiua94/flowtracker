@@ -52,6 +52,8 @@ def precompute_sample(sample, args, pair_root, repo_root):
     queries_path = sampler_dir / "queries.csv"
     tracks_path = cotracker_dir / "tracks.npy"
     prior_path = rasterizer_dir / "g_track.npy"
+    enhanced_dir = alignment_dir / "trajectory_attention"
+    enhanced_flow_path = enhanced_dir / "enhanced_track_flow.npy"
 
     if not should_skip(flow_path, args.overwrite):
         run_command(
@@ -158,6 +160,48 @@ def precompute_sample(sample, args, pair_root, repo_root):
     else:
         print(f"skip alignment: {alignment_dir / 'track_flow.npy'}", flush=True)
 
+    raster_track_flow = alignment_dir / "track_flow.npy"
+    raster_confidence = alignment_dir / "confidence.npy"
+    raster_valid_mask = alignment_dir / "valid_mask.npy"
+    if args.use_trajectory_attention:
+        enhanced_dir.mkdir(parents=True, exist_ok=True)
+        if not should_skip(enhanced_flow_path, args.overwrite):
+            run_command(
+                [
+                    sys.executable,
+                    "demo_trajectory_attention.py",
+                    "--points",
+                    str(alignment_dir / "points.npy"),
+                    "--track_flow",
+                    str(alignment_dir / "track_flow.npy"),
+                    "--valid_mask",
+                    str(alignment_dir / "valid_mask.npy"),
+                    "--confidence",
+                    str(alignment_dir / "confidence.npy"),
+                    "--endpoint_error",
+                    str(alignment_dir / "endpoint_error.npy"),
+                    "--flow",
+                    str(flow_path),
+                    "--output_dir",
+                    str(enhanced_dir),
+                    "--spatial_sigma",
+                    str(args.attention_spatial_sigma),
+                    "--motion_sigma",
+                    str(args.attention_motion_sigma),
+                    "--endpoint_error_scale",
+                    str(args.attention_endpoint_error_scale),
+                    "--self_weight",
+                    str(args.attention_self_weight),
+                ]
+                + (["--promote_invalid"] if args.attention_promote_invalid else []),
+                args.dry_run,
+            )
+        else:
+            print(f"skip trajectory attention: {enhanced_flow_path}", flush=True)
+        raster_track_flow = enhanced_flow_path
+        raster_confidence = enhanced_dir / "enhanced_confidence.npy"
+        raster_valid_mask = enhanced_dir / "enhanced_valid_mask.npy"
+
     if not should_skip(prior_path, args.overwrite):
         run_command(
             [
@@ -166,11 +210,11 @@ def precompute_sample(sample, args, pair_root, repo_root):
                 "--points",
                 str(alignment_dir / "points.npy"),
                 "--track_flow",
-                str(alignment_dir / "track_flow.npy"),
+                str(raster_track_flow),
                 "--valid_mask",
-                str(alignment_dir / "valid_mask.npy"),
+                str(raster_valid_mask),
                 "--confidence",
-                str(alignment_dir / "confidence.npy"),
+                str(raster_confidence),
                 "--endpoint_error",
                 str(alignment_dir / "endpoint_error.npy"),
                 "--flow",
@@ -211,6 +255,12 @@ def main():
     parser.add_argument("--image_edge_weight", type=float, default=0.0)
     parser.add_argument("--min_confidence", type=float, default=0.0)
     parser.add_argument("--max_alignment_epe", type=float, default=None, help="Drop rasterized track points with alignment EPE above this value")
+    parser.add_argument("--use_trajectory_attention", action="store_true", help="Enhance sparse track flow before rasterization")
+    parser.add_argument("--attention_spatial_sigma", type=float, default=96.0)
+    parser.add_argument("--attention_motion_sigma", type=float, default=8.0)
+    parser.add_argument("--attention_endpoint_error_scale", type=float, default=3.0)
+    parser.add_argument("--attention_self_weight", type=float, default=1.0)
+    parser.add_argument("--attention_promote_invalid", action="store_true")
     args = parser.parse_args()
 
     repo_root = Path.cwd().resolve()

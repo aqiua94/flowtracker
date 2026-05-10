@@ -620,11 +620,375 @@ demo_fusion_outputs/sintel_clean_val10_eval/sample_0005/
   - 新增参数 `--max_pairs_per_scene`。
   - 功能：多 scene 训练时，每个 scene 取固定数量样本，避免某个 scene 因排序或数量问题占据过多训练样本。
 
-## 9. 当前结论
+## 9. 中等规模多 Scene 阶段六产物
+
+本节记录第一次中等规模多 scene 阶段六训练：训练集使用 5 个 scene、每个 scene 20 对相邻帧，共 100 对；验证集使用 2 个未参与训练的 scene、每个 scene 10 对，共 20 对。该实验同时启用了阶段四 alignment EPE 过滤，阈值为 `max_alignment_epe = 3.0`。
+
+### 训练预计算目录：`precomputed/track_guided_sintel_clean_multiscene_train100_safe/`
+
+- 来源：`scripts/prepare_sintel_track_guided_manifest.py` 和 `scripts/precompute_track_guided_from_pairs.py`。
+- 训练 scene：`alley_1`、`bamboo_1`、`bamboo_2`、`market_2`、`shaman_2`。
+- 样本数：`100`。
+- 安全过滤：`scripts/precompute_track_guided_from_pairs.py --max_alignment_epe 3.0`，栅格化前丢弃 `alignment/endpoint_error.npy > 3.0` 的轨迹点。
+- 典型文件：
+  - `manifest.json`：阶段六训练和评估读取的样本索引。
+  - `manifest_pairs.json`：阶段一到阶段五批量预计算读取的帧对索引。
+  - 每个样本目录中的 `flowseek/flow.npy`：FlowSeek 初始光流。
+  - 每个样本目录中的 `alignment/endpoint_error.npy`：轨迹位移与 FlowSeek 采样光流的逐点 EPE，用于安全过滤。
+  - 每个样本目录中的 `rasterizer/g_track.npy`：过滤后的五通道轨迹先验。
+
+训练预计算中观察到 `market_2` 比较困难，部分样本 alignment 最大 EPE 可超过 `30`，过滤后有效栅格化点数会从约 `118/128` 降到约 `99/128`。这说明安全过滤确实挡住了明显不一致的轨迹 outlier。
+
+### 验证预计算目录：`precomputed/track_guided_sintel_clean_multiscene_val20_safe/`
+
+- 来源：同上。
+- 验证 scene：`ambush_2`、`temple_2`。
+- 样本数：`20`。
+- 用途：跨 scene 压力测试，不参与训练。
+- 典型现象：
+  - `ambush_2` 大位移、遮挡明显，部分样本有效轨迹比例只有约 `0.52-0.88`。
+  - 过滤后的轨迹 prior 覆盖率明显低于训练集：训练集平均约 `0.000262`，验证集平均约 `0.000173`。
+
+### 训练输出：`demo_fusion_outputs/sintel_clean_multiscene_train100_safe/`
+
+- `fusion_net_smoke.pth`
+  - 来源：`train_track_guided.py`。
+  - 含义：使用 100 对多 scene 样本训练 1000 step 得到的阶段六 FusionNet checkpoint。
+  - 训练配置要点：`hidden_dim=32`，`lambda_flow=1.0`，`lambda_track=0.2`，`lambda_smooth=0.001`，`batch_size=1`。
+
+- `train_history.json`
+  - 来源：`train_track_guided.py`。
+  - 含义：1000 step 训练历史。由于每次日志对应随机样本，loss 有明显波动，不能只看第一行和最后一行判断泛化。
+
+### 训练集评估：`demo_fusion_outputs/sintel_clean_multiscene_train100_safe_eval/`
+
+- `metrics.json`
+  - 来源：`evaluate_track_guided.py`。
+  - 当前结果：
+    - `mean_initial_epe = 0.629587`
+    - `mean_refined_epe = 0.601544`
+    - `mean_epe_delta = -0.028043`
+    - `num_improved = 95`
+    - `num_worse = 5`
+
+该结果说明中等规模训练在训练分布内有效，绝大多数样本 refined flow 优于 FlowSeek 初始光流。
+
+### 原始跨 Scene 验证：`demo_fusion_outputs/sintel_clean_multiscene_val20_safe_eval/`
+
+- `metrics.json`
+  - 来源：`evaluate_track_guided.py`，未启用推理时回退。
+  - 当前结果：
+    - `mean_initial_epe = 2.209927`
+    - `mean_refined_epe = 2.221544`
+    - `mean_epe_delta = 0.011617`
+    - `num_improved = 4`
+    - `num_worse = 16`
+
+该结果说明仅靠训练时/预计算时的 alignment EPE 过滤还不够。模型在训练分布内有效，但遇到 `ambush_2` 和 `temple_2` 这种低 prior 覆盖率、强运动验证集时，直接应用 refinement 会产生轻微平均劣化。
+
+### 推理时安全回退代码：`evaluate_track_guided.py`
+
+- 新增参数：
+  - `--safe_refinement`：开启推理时安全回退。
+  - `--min_prior_coverage`：要求 `G_track` 置信度通道非零像素比例达到阈值，否则回退到 FlowSeek 初始光流。
+  - `--min_gate_mean`：门控均值低于阈值时回退，当前实验未使用。
+  - `--max_delta_mean_abs`：预测残差过大时回退，当前实验未使用。
+
+- 新增指标：
+  - `prior_coverage`：每个样本 `G_track[..., 2] > 0` 的像素比例。
+  - `used_fallback`：该样本是否触发回退。
+  - `fallback_reason`：回退原因。
+  - `num_fallback`：整体触发回退的样本数量。
+
+### 宽松回退评估：`demo_fusion_outputs/sintel_clean_multiscene_val20_safe_eval_guarded/`
+
+- 配置：`--safe_refinement --min_prior_coverage 0.00022`。
+- 当前结果：
+  - `mean_initial_epe = 2.209927`
+  - `mean_refined_epe = 2.211249`
+  - `mean_epe_delta = 0.001322`
+  - `num_fallback = 19`
+  - `num_improved = 0`
+  - `num_worse = 1`
+
+该阈值挡住了 19/20 个低覆盖验证样本，只剩 1 个样本仍有轻微劣化。
+
+### 严格回退评估：`demo_fusion_outputs/sintel_clean_multiscene_val20_safe_eval_guarded_strict/`
+
+- 配置：`--safe_refinement --min_prior_coverage 0.000225`。
+- 当前结果：
+  - `mean_initial_epe = 2.209927`
+  - `mean_refined_epe = 2.209927`
+  - `mean_epe_delta = 0.000000`
+  - `num_fallback = 20`
+  - `num_improved = 0`
+  - `num_worse = 0`
+
+该结果说明推理时安全回退可以保证当前困难验证集上不劣化。但它也比较保守：在该验证集上全部回退，等价于暂时不使用 FusionNet refinement。
+
+### 严格回退训练集评估：`demo_fusion_outputs/sintel_clean_multiscene_train100_safe_eval_guarded_strict/`
+
+- 配置：同样使用 `--safe_refinement --min_prior_coverage 0.000225`。
+- 当前结果：
+  - `mean_initial_epe = 0.629587`
+  - `mean_refined_epe = 0.605227`
+  - `mean_epe_delta = -0.024360`
+  - `num_improved = 87`
+  - `num_worse = 5`
+
+该结果说明严格回退没有完全抹掉训练分布内的收益，但会比无回退版本更保守。
+
+## 10. 阶段七轨迹注意力产物
+
+阶段七第一版采用可靠性引导的跨轨迹注意力增强。它不是端到端训练的 Transformer，而是一个可解释的轻量模块：根据轨迹点之间的空间距离、运动相似度、置信度和 alignment EPE 形成注意力权重，让低可靠轨迹向附近高可靠轨迹的运动共识靠拢，高可靠轨迹基本保持原始 CoTracker 位移。
+
+### 新增代码：`core/track_guidance/trajectory_attention.py`
+
+- `trajectory_attention_enhance(...)`
+  - 输入：阶段四输出的 `points.npy`、`track_flow.npy`、`valid_mask.npy`、`confidence.npy`，可选 `endpoint_error.npy`。
+  - 输出：增强后的 `enhanced_track_flow`、`enhanced_confidence`、`enhanced_valid_mask`、`attention` 和统计信息。
+  - 功能：对每个轨迹点计算跨点注意力。注意力源点由可靠性加权，可靠性来自 `valid_mask * confidence * exp(-endpoint_error / endpoint_error_scale)`。
+  - 设计目的：减少 outlier 轨迹对阶段六的误导，并为低可靠点提供更平滑的局部运动估计。
+
+- `TrajectoryAttentionStats`
+  - 输出统计结构。
+  - 字段包括输入/输出有效点数、平均置信度、平均可靠性、平均轨迹位移改变量和最大轨迹位移改变量。
+
+### 新增脚本：`demo_trajectory_attention.py`
+
+- 来源：阶段七 demo 入口。
+- 功能：
+  - 读取阶段四 alignment 产物。
+  - 调用 `trajectory_attention_enhance(...)`。
+  - 保存增强轨迹和注意力矩阵。
+  - 生成两张可视化：
+    - `attention_matrix.png`：轨迹点之间的注意力权重矩阵。
+    - `flow_delta_points.png`：每个轨迹点被阶段七修改的位移幅值。
+
+输出文件：
+
+```text
+enhanced_track_flow.npy
+enhanced_confidence.npy
+enhanced_valid_mask.npy
+attention.npy
+trajectory_attention_stats.json
+attention_matrix.png
+flow_delta_points.png
+```
+
+### 批处理接入：`scripts/precompute_track_guided_from_pairs.py`
+
+新增参数：
+
+- `--use_trajectory_attention`
+  - 在阶段四 alignment 后、阶段五 rasterizer 前插入阶段七轨迹注意力。
+
+- `--attention_spatial_sigma`
+  - 空间注意力尺度，默认 `96.0`。
+
+- `--attention_motion_sigma`
+  - 运动相似度注意力尺度，默认 `8.0`。
+
+- `--attention_endpoint_error_scale`
+  - alignment EPE 可靠性衰减尺度，默认 `3.0`。
+
+- `--attention_self_weight`
+  - 自身轨迹保留偏置，默认 `1.0`。
+
+- `--attention_promote_invalid`
+  - 是否允许低置信/不可见点被注意力结果重新提升为有效点。当前默认关闭，避免盲目增加错误先验。
+
+启用后，每个样本会新增：
+
+```text
+alignment/trajectory_attention/enhanced_track_flow.npy
+alignment/trajectory_attention/enhanced_confidence.npy
+alignment/trajectory_attention/enhanced_valid_mask.npy
+alignment/trajectory_attention/attention.npy
+alignment/trajectory_attention/trajectory_attention_stats.json
+alignment/trajectory_attention/attention_matrix.png
+alignment/trajectory_attention/flow_delta_points.png
+```
+
+随后 `rasterizer/g_track.npy` 会使用增强后的 `enhanced_track_flow.npy`、`enhanced_confidence.npy` 和 `enhanced_valid_mask.npy` 生成。
+
+### 合成 Smoke：`demo_trajectory_attention_outputs/stage7_smoke/`
+
+- 来源：使用 `demo_alignment_outputs/stage4_smoke/` 的合成平移样本运行 `demo_trajectory_attention.py`。
+- 当前结果：
+  - 输入有效点：`212/256`
+  - 输出有效点：`212/256`
+  - 平均可靠性：`0.974131`
+  - 平均位移改变量：`0.002986 px`
+  - 最大位移改变量：`0.110568 px`
+
+解释：合成样本本身非常可靠，阶段七只做极小修正，说明模块不会在高可靠轨迹上过度改动。
+
+### 合成 Smoke 栅格化：`demo_trajectory_attention_outputs/stage7_smoke_rasterizer/`
+
+- 来源：使用阶段七增强后的 `enhanced_track_flow.npy` 运行 `demo_track_prior_rasterizer.py`。
+- 输出：
+  - `g_track.npy`
+  - `g_track_stats.json`
+  - `g_track_magnitude.png`
+  - `g_track_confidence.png`
+  - `g_track_distance.png`
+- 当前结果：
+  - `G_track shape = (216, 384, 5)`
+  - 有效输入点：`212/256`
+  - 栅格化像素：`212`
+
+该结果说明阶段七输出可以无缝回到阶段五栅格化格式，也就是可以直接作为阶段六 FusionNet 输入。
+
+### 困难样本 Demo：`demo_trajectory_attention_outputs/ambush2_frame0002/`
+
+- 来源：使用 `precomputed/track_guided_sintel_clean_multiscene_val20_safe/ambush_2/ambush_2_frame_0002/alignment/` 运行阶段七。
+- 当前结果：
+  - 输入有效点：`67/128`
+  - 输出有效点：`67/128`
+  - 平均可靠性：`0.636699`
+  - 平均位移改变量：`2.498192 px`
+  - 最大位移改变量：`19.174435 px`
+
+与 FlowSeek 采样光流的对齐 EPE 对比：
+
+- 原始轨迹：
+  - mean `5.490172`
+  - median `1.184931`
+  - max `77.626709`
+- 阶段七增强轨迹：
+  - mean `5.058599`
+  - median `1.280508`
+  - max `69.529526`
+
+解释：困难样本中阶段七会明显修改低可靠轨迹，并降低平均和最大 outlier 对齐误差。median 略升，说明第一版更偏向压制大 outlier，而不是保证每个点都更贴近 FlowSeek。后续如果接入 GT 或训练式注意力，可以继续优化该权衡。
+
+### 真实 Sintel 批处理 Smoke：`precomputed/track_guided_sintel_clean_stage7_smoke/`
+
+- 来源：
+  - `scripts/prepare_sintel_track_guided_manifest.py`
+  - `scripts/precompute_track_guided_from_pairs.py --use_trajectory_attention`
+- 样本：`ambush_2 frame_0001 -> frame_0002`。
+- 当前结果：
+  - alignment 有效轨迹：`81/128`
+  - alignment EPE：mean `2.3997`，median `1.1169`，max `48.2313`
+  - 阶段七平均可靠性：`0.629381`
+  - 阶段七平均位移改变量：`2.467888 px`
+  - 阶段七最大位移改变量：`34.389809 px`
+  - 栅格化前叠加 `max_alignment_epe = 3.0` 后，有效输入点：`70/128`
+  - 输出 `rasterizer/g_track.npy` 尺寸：`(436, 1024, 5)`
+
+该目录证明阶段七已经接入完整预计算流水线。后续要验证它是否真正帮助阶段六，需要用 `--use_trajectory_attention` 重新生成训练/验证预计算目录，再训练阶段六 FusionNet 并比较 EPE。
+
+## 11. 中等规模 Trajectory Attention 阶段六产物
+
+本节记录使用 `--use_trajectory_attention` 重新生成的中等规模多 scene 预计算，并在该预计算上重训阶段六 FusionNet。训练/验证 split 与第 9 节 baseline 保持一致，便于直接比较：
+
+- 训练集：`alley_1`、`bamboo_1`、`bamboo_2`、`market_2`、`shaman_2`，每个 scene 20 对，共 `100` 对。
+- 验证集：`ambush_2`、`temple_2`，每个 scene 10 对，共 `20` 对。
+- 预计算参数：`flowseek_max_size=384`、`num_points=128`、`max_alignment_epe=3.0`、`--use_trajectory_attention`、`attention_spatial_sigma=128`、`attention_motion_sigma=24`、`attention_endpoint_error_scale=3.0`。
+
+### 训练预计算：`precomputed/track_guided_sintel_clean_multiscene_train100_attn/`
+
+- 来源：`scripts/prepare_sintel_track_guided_manifest.py` 生成 manifest，随后 `scripts/precompute_track_guided_from_pairs.py --use_trajectory_attention` 逐样本运行阶段一到阶段五，并在阶段四 alignment 和阶段五 rasterizer 之间插入阶段七。
+- 关键文件：
+  - `manifest.json`：阶段六训练和评估读取的 `100` 个样本索引。
+  - `manifest_pairs.json`：预计算脚本读取的相邻帧对。
+  - 每个样本目录下的 `alignment/trajectory_attention/enhanced_track_flow.npy`：阶段七增强后的稀疏轨迹位移。
+  - 每个样本目录下的 `alignment/trajectory_attention/enhanced_confidence.npy`：阶段七重估后的轨迹可靠性。
+  - 每个样本目录下的 `alignment/trajectory_attention/enhanced_valid_mask.npy`：阶段七输出有效点掩码。
+  - 每个样本目录下的 `alignment/trajectory_attention/trajectory_attention_stats.json`：该样本的有效点数、平均可靠性、平均/最大位移改变量。
+  - 每个样本目录下的 `rasterizer/g_track.npy`：使用阶段七增强轨迹生成的阶段六输入先验。
+
+训练集中大多数样本的阶段七修正较温和；`market_2` 中若干帧出现更明显修正，例如部分样本平均位移改变量约 `1.0-2.1 px`，最大改变量可超过 `25 px`，说明阶段七主要在疑似 outlier 或局部运动不一致区域发挥作用。
+
+### 验证预计算：`precomputed/track_guided_sintel_clean_multiscene_val20_attn/`
+
+- 来源：同样使用 `scripts/precompute_track_guided_from_pairs.py --use_trajectory_attention`，但 scene 换为未参与训练的 `ambush_2` 和 `temple_2`。
+- 关键文件结构与训练预计算一致。
+- 典型困难样本：
+  - `ambush_2_frame_0001`：阶段七平均可靠性 `0.629381`，平均位移改变量 `2.467888 px`，最大位移改变量 `34.389809 px`，栅格化有效点 `70/128`。
+  - `ambush_2_frame_0002`：阶段七平均可靠性 `0.636699`，平均位移改变量 `2.498192 px`，最大位移改变量 `19.174435 px`，栅格化有效点 `58/128`。
+  - `temple_2_frame_0010`：阶段七平均可靠性 `0.632488`，平均位移改变量 `2.299739 px`，最大位移改变量 `28.536127 px`，栅格化有效点 `93/128`。
+
+解释：验证集里 `ambush_2` 和后段 `temple_2` 的 attention 修正幅度明显大于多数训练样本，说明阶段七确实感知到了低可靠或强运动样本；但这也会放大训练/验证分布差异，需要通过评估确认是否真正提升最终 EPE。
+
+### 阶段六训练：`demo_fusion_outputs/sintel_clean_multiscene_train100_attn/`
+
+- 来源：使用 `precomputed/track_guided_sintel_clean_multiscene_train100_attn/manifest.json` 训练 `1000` step。
+- 关键文件：
+  - `fusion_net_smoke.pth`：使用 trajectory attention 预计算重训得到的阶段六 FusionNet checkpoint。
+  - `train_log.json`：训练过程 loss 历史。
+- 训练日志摘要：
+  - step `0001` total loss `0.370710`
+  - step `0500` total loss `0.496725`
+  - step `1000` total loss `0.455053`
+
+训练 loss 有波动，因此该实验主要以完整 train/val EPE 作为判断依据。
+
+### 原始评估：`demo_fusion_outputs/sintel_clean_multiscene_train100_attn_eval/`
+
+- 来源：使用 trajectory attention checkpoint 在 train100 上评估，不启用推理回退。
+- 结果：
+  - initial EPE：`0.629587`
+  - refined EPE：`0.598920`
+  - delta：`-0.030667`
+  - improved/worse：`95/5`
+
+与第 9 节 baseline train100 原始评估相比，trajectory attention 版本从 `0.601544` 降到 `0.598920`，训练分布内略有提升。
+
+### 原始跨 Scene 验证：`demo_fusion_outputs/sintel_clean_multiscene_val20_attn_eval/`
+
+- 来源：使用同一个 trajectory attention checkpoint 在 held-out val20 上评估，不启用推理回退。
+- 结果：
+  - initial EPE：`2.209927`
+  - refined EPE：`2.227108`
+  - delta：`+0.017182`
+  - improved/worse：`2/18`
+
+与第 9 节 baseline val20 原始评估相比，trajectory attention 版本从 `2.221544` 变为 `2.227108`，跨 scene 验证更差。这说明第一版阶段七增强了训练内收益，但还没有解决阶段六的跨 scene 泛化问题。
+
+### 严格安全评估：`*_attn_eval_guarded_strict/`
+
+- 来源：使用 `evaluate_track_guided.py --safe_refinement --min_prior_coverage 0.000225` 评估，与第 9 节严格安全阈值一致。
+- 训练集结果：`demo_fusion_outputs/sintel_clean_multiscene_train100_attn_eval_guarded_strict/`
+  - initial EPE：`0.629587`
+  - refined EPE：`0.602582`
+  - delta：`-0.027005`
+  - improved/worse：`87/5`
+  - fallback：`8/100`
+- 验证集结果：`demo_fusion_outputs/sintel_clean_multiscene_val20_attn_eval_guarded_strict/`
+  - initial EPE：`2.209927`
+  - refined EPE：`2.209927`
+  - delta：`0.000000`
+  - improved/worse：`0/0`
+  - fallback：`20/20`
+
+严格安全机制能完全挡住 val20 上的退化，但代价是验证集全部回退到原始 FlowSeek，没有产生实际提升。
+
+### 与 Baseline 对比
+
+| 实验 | Split | Guard | Refined EPE | Delta | Improved/Worse | Fallback |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| baseline | train100 | no | `0.601544` | `-0.028043` | `95/5` | - |
+| trajectory attention | train100 | no | `0.598920` | `-0.030667` | `95/5` | `0/100` |
+| baseline | val20 | no | `2.221544` | `+0.011617` | `4/16` | - |
+| trajectory attention | val20 | no | `2.227108` | `+0.017182` | `2/18` | `0/20` |
+| baseline | train100 | strict | `0.605227` | `-0.024360` | `87/5` | `8/100` |
+| trajectory attention | train100 | strict | `0.602582` | `-0.027005` | `87/5` | `8/100` |
+| baseline | val20 | strict | `2.209927` | `0.000000` | `0/0` | `20/20` |
+| trajectory attention | val20 | strict | `2.209927` | `0.000000` | `0/0` | `20/20` |
+
+结论：`--use_trajectory_attention` 对训练分布内阶段六有小幅正收益，但第一版还不能直接支持大批量训练，因为 held-out scene 原始验证更差。当前更稳的路线是保留阶段七预计算能力和推理安全回退，同时继续增强阶段六的可靠性建模，而不是只扩大数据规模。
+
+## 12. 当前结论
 
 - 合成 smoke：阶段一到阶段六全部跑通。
 - Sintel 训练集 20 对：预计算、训练和训练集内验证全部跑通。
 - Sintel held-out 验证集 10 对：全部样本 refined EPE 低于 initial EPE。
 - 跨 scene 小实验：`bamboo_1 -> ambush_2` 平均 EPE 有小幅改善，但存在 `2/10` 个样本变差。
-- 当前结果说明轨迹先验在小规模同 scene 实验中有效，跨 scene 有初步正向信号但还不够稳。
-- 下一步建议进行中等规模多 scene 阶段六训练，并启用 alignment EPE 安全过滤，再决定是否进入阶段七跨轨迹注意力。
+- 中等规模多 scene 训练：训练集内有效，`100` 对样本中 `95/100` 改善；但原始跨 scene 验证 `20` 对样本中 `16/20` 变差，说明阶段六基础 FusionNet 的跨 scene 泛化仍不稳定。
+- 中等规模 trajectory attention 训练：训练集内 EPE 从 baseline 的 `0.601544` 降到 `0.598920`，但 held-out val20 从 `2.221544` 升到 `2.227108`，说明第一版阶段七增强了训练内收益但没有改善跨 scene 泛化。
+- 安全机制：预计算阶段的 alignment EPE 过滤能挡住轨迹 outlier；推理阶段的 prior coverage 回退能在困难验证集上避免劣化。
+- 当前建议：不要直接进入大批量阶段六训练。应保留阶段七预计算与推理回退，并优先增强阶段六的可靠性输入、coverage/gate 约束或训练时安全损失，让模型学会在低覆盖、强遮挡、大位移 scene 中少改或不改。
