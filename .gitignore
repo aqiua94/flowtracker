@@ -6,9 +6,12 @@ weights/
 *.pth
 
 # demo outputs and temporary artifacts
+demo_alignment_outputs/
 demo_cotracker_outputs/
 demo_pair_outputs/
+demo_rasterizer_outputs/
 demo_sampler_outputs/
+demo_fusion_outputs/
 
 # numpy and binary artifacts
 *.npy

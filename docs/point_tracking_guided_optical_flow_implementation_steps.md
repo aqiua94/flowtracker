@@ -479,6 +479,37 @@ F_track^{t -> t+1}(p_i^t) = Q_{t+1,i} - Q_{t,i}
 - 稀疏置信度。
 - FlowSeek 与 CoTracker3 对齐检查脚本。
 
+当前新增阶段四模块：
+
+```text
+core/track_guidance/cotracker_wrapper.py
+demo_track_flow_alignment.py
+```
+
+当前输出：
+
+```text
+demo_alignment_outputs/stage4_smoke/points.npy
+demo_alignment_outputs/stage4_smoke/next_points.npy
+demo_alignment_outputs/stage4_smoke/track_flow.npy
+demo_alignment_outputs/stage4_smoke/flowseek_at_points.npy
+demo_alignment_outputs/stage4_smoke/valid_mask.npy
+demo_alignment_outputs/stage4_smoke/confidence.npy
+demo_alignment_outputs/stage4_smoke/endpoint_error.npy
+demo_alignment_outputs/stage4_smoke/alignment_stats.json
+demo_alignment_outputs/stage4_smoke/alignment_overlay.png
+```
+
+说明：
+
+- `points.npy`：相邻帧对起点坐标，形状为 `(N, 2)`，坐标顺序为 `(x, y)`。
+- `next_points.npy`：下一帧轨迹坐标，形状为 `(N, 2)`。
+- `track_flow.npy`：由 CoTracker3 轨迹计算得到的稀疏位移，形状为 `(N, 2)`。
+- `flowseek_at_points.npy`：在同一批起点上双线性采样得到的 FlowSeek 稠密光流。
+- `valid_mask.npy`：同时满足可见性、置信度、边界和有限值检查的有效轨迹点。
+- `endpoint_error.npy`：`track_flow` 与 `flowseek_at_points` 的逐点 EPE。
+- `alignment_overlay.png`：绿色箭头表示 CoTracker 轨迹位移，红色箭头表示 FlowSeek 采样位移。
+
 ### 5.4 验收标准
 
 - 同一点的轨迹位移和 FlowSeek 采样光流方向基本一致。
@@ -495,6 +526,46 @@ F_track^{t -> t+1}(p_i^t) = Q_{t+1,i} - Q_{t,i}
 - 光流单位是否是像素。
 - resize 后光流是否按比例缩放。
 - 轨迹点是否落在图像边界内。
+
+### 5.6 阶段四当前烟雾测试结果
+
+测试输入：
+
+```text
+demo_pair_outputs/stage1_smoke/flow.npy
+demo_cotracker_outputs/stage3_sampler_check/tracks.npy
+demo_cotracker_outputs/stage3_sampler_check/visibility.npy
+demo_cotracker_outputs/stage3_sampler_check/confidence.npy
+demo_pair_inputs/frame_0001.png
+```
+
+测试命令：
+
+```shell
+/root/miniconda3/envs/flowseek/bin/python demo_track_flow_alignment.py \
+  --flow demo_pair_outputs/stage1_smoke/flow.npy \
+  --tracks demo_cotracker_outputs/stage3_sampler_check/tracks.npy \
+  --visibility demo_cotracker_outputs/stage3_sampler_check/visibility.npy \
+  --confidence demo_cotracker_outputs/stage3_sampler_check/confidence.npy \
+  --image demo_pair_inputs/frame_0001.png \
+  --output_dir demo_alignment_outputs/stage4_smoke \
+  --pair_index 0 \
+  --min_confidence 0.0
+```
+
+输出统计：
+
+```text
+valid tracks: 212 / 256
+valid ratio: 0.828
+mean CoTracker displacement: [12.0498, 0.0296]
+mean FlowSeek sampled flow:  [11.9998, 0.0244]
+endpoint error mean:   0.0795
+endpoint error median: 0.0616
+endpoint error max:    0.6392
+```
+
+该合成平移样例的真实水平位移为 12 像素。阶段四结果说明 CoTracker3 稀疏轨迹位移与 FlowSeek 采样光流在同一坐标系下基本一致，可以作为阶段五轨迹先验图构建的输入。
 
 ## 6. 阶段五：构建轨迹先验图
 
@@ -517,6 +588,31 @@ F_track^{t -> t+1}(p_i^t) = Q_{t+1,i} - Q_{t,i}
 - 轨迹先验张量 `G_track`。
 - 可视化的稀疏位移图、置信度图和距离图。
 
+当前新增阶段五模块：
+
+```text
+core/track_guidance/rasterizer.py
+demo_track_prior_rasterizer.py
+```
+
+当前输出：
+
+```text
+demo_rasterizer_outputs/stage5_smoke/g_track.npy
+demo_rasterizer_outputs/stage5_smoke/g_track_stats.json
+demo_rasterizer_outputs/stage5_smoke/g_track_magnitude.png
+demo_rasterizer_outputs/stage5_smoke/g_track_confidence.png
+demo_rasterizer_outputs/stage5_smoke/g_track_distance.png
+```
+
+说明：
+
+- `g_track.npy`：默认形状为 `(H, W, 5)`。
+- 通道顺序为 `[dx, dy, confidence, visibility, distance_to_nearest_track]`。
+- 有效轨迹点位置写入 CoTracker3 轨迹位移、置信度和可见性。
+- 非轨迹点区域的 `dx/dy/confidence/visibility` 保持为 0。
+- 距离通道使用 OpenCV distance transform 计算到最近有效轨迹点的像素距离。
+
 ### 6.4 推荐通道设计
 
 第一版建议使用 5 个通道：
@@ -537,6 +633,52 @@ F_track^{t -> t+1}(p_i^t) = Q_{t+1,i} - Q_{t,i}
 - 轨迹点位置处能正确读取到轨迹位移。
 - 非轨迹点区域不会产生错误高置信信息。
 - 距离图和置信度图可视化合理。
+
+### 6.6 阶段五当前烟雾测试结果
+
+测试输入：
+
+```text
+demo_alignment_outputs/stage4_smoke/points.npy
+demo_alignment_outputs/stage4_smoke/track_flow.npy
+demo_alignment_outputs/stage4_smoke/valid_mask.npy
+demo_alignment_outputs/stage4_smoke/confidence.npy
+demo_pair_outputs/stage1_smoke/flow.npy
+```
+
+测试命令：
+
+```shell
+/root/miniconda3/envs/flowseek/bin/python demo_track_prior_rasterizer.py \
+  --points demo_alignment_outputs/stage4_smoke/points.npy \
+  --track_flow demo_alignment_outputs/stage4_smoke/track_flow.npy \
+  --valid_mask demo_alignment_outputs/stage4_smoke/valid_mask.npy \
+  --confidence demo_alignment_outputs/stage4_smoke/confidence.npy \
+  --flow demo_pair_outputs/stage1_smoke/flow.npy \
+  --output_dir demo_rasterizer_outputs/stage5_smoke
+```
+
+输出统计：
+
+```text
+G_track shape: (216, 384, 5)
+valid input points: 212 / 256
+rasterized pixels: 212
+distance range: [0.0000, 43.8634]
+distance mean: 11.2530
+```
+
+点位回读检查：
+
+```text
+checked points: 212
+visibility range at track points: [1.0, 1.0]
+max distance at track points: 0.0
+mean abs flow error at rasterized pixels: 0.0
+mean confidence error: 0.0
+```
+
+说明阶段五的轨迹先验图尺寸、通道写入、有效点 mask 和距离图均符合第一版验收要求。
 
 ## 7. 阶段六：训练后处理式 FusionNet
 
@@ -589,6 +731,36 @@ F_refined = F_0 + g * Delta F
 - 第一版训练日志。
 - FlowSeek 与 refined flow 的对比结果。
 
+当前新增阶段六模块：
+
+```text
+core/track_guidance/fusion_net.py
+core/track_guidance/losses.py
+train_track_guided.py
+```
+
+当前训练入口采用预计算数据 manifest。每个样本建议包含：
+
+```json
+{
+  "initial_flow": "path/to/flowseek_flow.npy",
+  "track_prior": "path/to/g_track.npy",
+  "gt_flow": "path/to/gt_flow.npy",
+  "valid": "path/to/valid.npy"
+}
+```
+
+其中 `gt_flow` 和 `valid` 可选。若提供真实光流，训练使用监督损失；若没有真实光流，可以先使用轨迹点弱监督和光流平滑损失做链路验证。
+
+阶段六开始可以正式引入真实数据集。推荐路线是：
+
+1. 先选 FlyingChairs 或 Sintel training 这类带真实光流的数据集。
+2. 对每个相邻帧样本离线预计算 FlowSeek 初始光流 `F_0`。
+3. 基于 `F_0` 自适应采样，并运行 CoTracker3 得到轨迹。
+4. 对齐轨迹并栅格化得到 `G_track`。
+5. 将 `F_0`、`G_track`、真实光流和 valid mask 写入 manifest。
+6. 使用 `train_track_guided.py --manifest ...` 训练 FusionNet。
+
 ### 7.5 第一版损失函数
 
 若有真实光流：
@@ -621,6 +793,49 @@ L = lambda_track * L_track + lambda_smooth * L_smooth
 - 在验证集上，`F_refined` 的 EPE 优于或不差于 `F_0`。
 - 在轨迹点附近，refined flow 与轨迹位移更一致。
 - 没有出现全图光流被错误轨迹大幅带偏的问题。
+
+### 7.7 阶段六当前烟雾测试结果
+
+当前先使用阶段五合成平移样例做弱监督烟雾训练，不引入真实光流 GT，仅验证 FusionNet 前向、反向、loss 和 checkpoint 保存链路。
+
+测试输入：
+
+```text
+demo_pair_outputs/stage1_smoke/flow.npy
+demo_rasterizer_outputs/stage5_smoke/g_track.npy
+```
+
+测试命令：
+
+```shell
+/root/miniconda3/envs/flowseek/bin/python train_track_guided.py \
+  --initial_flow demo_pair_outputs/stage1_smoke/flow.npy \
+  --track_prior demo_rasterizer_outputs/stage5_smoke/g_track.npy \
+  --output_dir demo_fusion_outputs/stage6_smoke \
+  --steps 20 \
+  --hidden_dim 16 \
+  --lambda_flow 0.0 \
+  --lambda_track 1.0 \
+  --lambda_smooth 0.001 \
+  --device cuda
+```
+
+输出结果：
+
+```text
+initial total loss: 0.049833
+final total loss:   0.041275
+```
+
+输出文件：
+
+```text
+demo_fusion_outputs/stage6_smoke/fusion_net_smoke.pth
+demo_fusion_outputs/stage6_smoke/train_history.json
+demo_fusion_outputs/stage6_smoke/stage6_smoke_manifest.json
+```
+
+该结果说明后处理式 FusionNet 的基本训练链路已跑通。下一步若要验证真实提升，应接入带真实光流的数据集并比较 `F_refined` 与 `F_0` 的验证集 EPE。
 
 ## 8. 阶段七：加入跨轨迹注意力模块
 
@@ -762,3 +977,6 @@ scripts/visualize_track_guidance.py
 | 2026-05-10 | 创建 `flowseek` conda 环境，使用国内镜像安装依赖，并完成 FlowSeek 两帧烟雾测试 | 阶段一基础链路跑通 |
 | 2026-05-10 | 新增 `demo_cotracker_pair.py`，通过 PyTorch Hub 加载官方 CoTracker3 offline 模型并完成手工点跟踪烟雾测试 | 阶段二基础链路跑通 |
 | 2026-05-10 | 新增 `core/track_guidance/sampler.py` 和 `demo_adaptive_sampler.py`，完成基于 FlowSeek 光流的自适应稀疏点采样，并验证输出可直接输入 CoTracker3 | 阶段三基础链路跑通 |
+| 2026-05-10 | 新增 `core/track_guidance/cotracker_wrapper.py` 和 `demo_track_flow_alignment.py`，完成 CoTracker3 轨迹到稀疏光流的转换，并验证其与 FlowSeek 采样光流坐标一致 | 阶段四基础链路跑通 |
+| 2026-05-10 | 新增 `core/track_guidance/rasterizer.py` 和 `demo_track_prior_rasterizer.py`，完成五通道轨迹先验图构建，并通过点位回读验证通道写入正确 | 阶段五基础链路跑通 |
+| 2026-05-10 | 新增 `core/track_guidance/fusion_net.py`、`core/track_guidance/losses.py` 和 `train_track_guided.py`，完成后处理式 FusionNet 弱监督烟雾训练 | 阶段六基础训练链路跑通 |
