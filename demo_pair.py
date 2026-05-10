@@ -45,6 +45,18 @@ def resize_pair(image1, image2, max_size):
     return image1, image2, scale
 
 
+def resize_flow_to_shape(flow, target_shape, source_shape):
+    target_height, target_width = target_shape
+    source_height, source_width = source_shape
+    if (source_height, source_width) == (target_height, target_width):
+        return flow
+
+    flow = F.interpolate(flow, size=(target_height, target_width), mode="bilinear", align_corners=False)
+    flow[:, 0] *= float(target_width) / float(source_width)
+    flow[:, 1] *= float(target_height) / float(source_height)
+    return flow
+
+
 @torch.no_grad()
 def run_flow(args, model, image1, image2):
     if args.input_scale != 0:
@@ -84,7 +96,9 @@ def main():
     if image1.shape[-2:] != image2.shape[-2:]:
         raise ValueError(f"Input image sizes differ: {image1.shape[-2:]} vs {image2.shape[-2:]}")
 
+    original_shape = image1.shape[-2:]
     image1, image2, resize_scale = resize_pair(image1, image2, args.max_size)
+    resized_shape = image1.shape[-2:]
     image1 = image1.cuda()
     image2 = image2.cuda()
 
@@ -94,7 +108,7 @@ def main():
 
     flow = run_flow(args, model, image1, image2)
     if resize_scale != 1.0:
-        flow = F.interpolate(flow, scale_factor=1.0 / resize_scale, mode="bilinear", align_corners=False) / resize_scale
+        flow = resize_flow_to_shape(flow, original_shape, resized_shape)
 
     flow_np = flow[0].permute(1, 2, 0).detach().cpu().numpy()
     np.save(os.path.join(args.output_dir, "flow.npy"), flow_np)

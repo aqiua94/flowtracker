@@ -186,6 +186,29 @@ PY
 
 ## 9. 预计算流程
 
+当前新增了一个轻量准备脚本，用于在数据放好后先生成训练 manifest、样本路径清单，并把 Sintel `.flo` GT 转成 `.npy`：
+
+```shell
+/root/miniconda3/envs/flowseek/bin/python scripts/prepare_sintel_track_guided_manifest.py \
+  --sintel_root data/MPI-Sintel \
+  --dstype clean \
+  --scenes alley_1 \
+  --max_pairs 20 \
+  --output_root precomputed/track_guided_sintel_clean \
+  --manifest precomputed/track_guided_sintel_clean/manifest.json
+```
+
+输出：
+
+```text
+precomputed/track_guided_sintel_clean/manifest.json
+precomputed/track_guided_sintel_clean/manifest_pairs.json
+precomputed/track_guided_sintel_clean/<scene>/<scene>_<frame>/gt_flow.npy
+precomputed/track_guided_sintel_clean/<scene>/<scene>_<frame>/valid.npy
+```
+
+其中 `manifest.json` 是 `train_track_guided.py` 的输入；`manifest_pairs.json` 记录每个样本的原始图片路径和各阶段预计算输出目录，供后续批处理脚本使用。
+
 对每个 Sintel 相邻帧样本执行：
 
 1. 使用 `demo_pair.py` 或后续批处理脚本生成 FlowSeek 初始光流：

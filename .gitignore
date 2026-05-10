@@ -17,3 +17,9 @@ demo_fusion_outputs/
 *.npy
 *.npz
 *.ckpt
+# precomputed outputs and large caches
+precomputed/
+
+# Python bytecode caches
+__pycache__/
+*.pyc
