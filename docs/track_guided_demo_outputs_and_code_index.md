@@ -545,10 +545,86 @@ demo_fusion_outputs/sintel_clean_val10_eval/sample_0005/
 9. `demo_fusion_outputs/sintel_clean_val10_eval/metrics.json`
    - 查看未参与训练样本上的定量改善。
 
-## 8. 当前结论
+## 8. 跨 Scene 小实验产物
+
+本节记录一次更严格的跨 scene 阶段六小实验：使用 `bamboo_1` 训练，使用 `ambush_2` 验证。该实验用于判断基础 FusionNet 是否具备初步跨场景泛化能力，以及是否需要在大规模训练前添加安全机制。
+
+### 训练预计算目录：`precomputed/track_guided_sintel_clean_bamboo1_train20/`
+
+- 来源：`scripts/prepare_sintel_track_guided_manifest.py` 和 `scripts/precompute_track_guided_from_pairs.py`。
+- 样本：Sintel `training/clean/bamboo_1` 前 20 对相邻帧。
+- 目录结构与 `precomputed/track_guided_sintel_clean_20/` 一致，每个样本包含：
+  - `flowseek/flow.npy`：FlowSeek 初始光流 `F_0`。
+  - `flowseek/flow_vis.png`：初始光流可视化。
+  - `sampler/sampled_points.png`：自适应采样点图。
+  - `cotracker/track_0000.png`、`track_0001.png`：CoTracker 轨迹可视化。
+  - `alignment/alignment_overlay.png`：CoTracker 稀疏位移与 FlowSeek 采样光流的对齐图。
+  - `alignment/alignment_stats.json`：有效轨迹数和对齐 EPE 统计。
+  - `rasterizer/g_track.npy`：训练用轨迹先验。
+  - `rasterizer/g_track_magnitude.png`、`g_track_confidence.png`、`g_track_distance.png`：轨迹先验三类可视化。
+
+### 验证预计算目录：`precomputed/track_guided_sintel_clean_ambush2_val10/`
+
+- 来源：同上。
+- 样本：Sintel `training/clean/ambush_2` 前 10 对相邻帧。
+- 用途：跨 scene 验证。该 scene 存在明显大位移和遮挡，部分样本有效轨迹数较少，例如约 `67/128` 到 `113/128`，轨迹/FlowSeek 对齐 EPE 也明显高于 `alley_1` 和 `bamboo_1`。
+- 典型文件含义与训练预计算目录一致。
+
+### 训练输出：`demo_fusion_outputs/sintel_clean_bamboo1_train20/`
+
+- `fusion_net_smoke.pth`
+  - 来源：`train_track_guided.py`。
+  - 含义：使用 `bamboo_1` 20 对样本训练 500 步得到的 FusionNet checkpoint。
+
+- `train_history.json`
+  - 来源：`train_track_guided.py`。
+  - 含义：训练 loss 历史。该训练比 `alley_1` 更难，loss 有下降但波动明显。
+
+### 训练 Scene 内评估：`demo_fusion_outputs/sintel_clean_bamboo1_train20_eval/`
+
+- `metrics.json`
+  - 来源：`evaluate_track_guided.py`。
+  - 含义：在 `bamboo_1` 训练样本上评估 `F_0` 和 `F_refined`。
+  - 当前结果：
+    - `mean_initial_epe = 0.589425`
+    - `mean_refined_epe = 0.542909`
+    - `mean_epe_delta = -0.046516`
+    - `num_improved = 20`
+    - `num_worse = 0`
+
+### 跨 Scene 评估：`demo_fusion_outputs/sintel_clean_bamboo1_to_ambush2_val10_eval/`
+
+- `metrics.json`
+  - 来源：`evaluate_track_guided.py`。
+  - 含义：使用 `bamboo_1` 训练得到的 checkpoint，在未参与训练的 `ambush_2` 样本上评估。
+  - 当前结果：
+    - `mean_initial_epe = 3.370809`
+    - `mean_refined_epe = 3.361017`
+    - `mean_epe_delta = -0.009792`
+    - `num_improved = 8`
+    - `num_worse = 2`
+
+该结果说明基础 FusionNet 已有一点跨 scene 泛化，但在大位移、遮挡、低有效轨迹比例场景下还不够稳。`ambush_2` 中有两个样本 refined EPE 高于 initial EPE，后续需要安全过滤或更强的轨迹建模。
+
+### 新增安全机制代码
+
+- `demo_track_prior_rasterizer.py`
+  - 新增参数 `--endpoint_error` 和 `--max_endpoint_error`。
+  - 功能：在栅格化 `G_track` 前，按阶段四得到的轨迹/FlowSeek 对齐 EPE 过滤明显 outlier 轨迹点。
+
+- `scripts/precompute_track_guided_from_pairs.py`
+  - 新增参数 `--max_alignment_epe`。
+  - 功能：批量预计算时自动把 `alignment/endpoint_error.npy` 传入栅格化脚本，超过阈值的轨迹点不会写入 `G_track`。
+
+- `scripts/prepare_sintel_track_guided_manifest.py`
+  - 新增参数 `--max_pairs_per_scene`。
+  - 功能：多 scene 训练时，每个 scene 取固定数量样本，避免某个 scene 因排序或数量问题占据过多训练样本。
+
+## 9. 当前结论
 
 - 合成 smoke：阶段一到阶段六全部跑通。
 - Sintel 训练集 20 对：预计算、训练和训练集内验证全部跑通。
 - Sintel held-out 验证集 10 对：全部样本 refined EPE 低于 initial EPE。
-- 当前结果说明轨迹先验在小规模同 scene 实验中有效。
-- 下一步如果要验证泛化能力，应使用不同 scene 作为验证集，例如用 `alley_1` 训练，用 `ambush_2`、`bamboo_1` 或其他 scene 做 held-out 验证。
+- 跨 scene 小实验：`bamboo_1 -> ambush_2` 平均 EPE 有小幅改善，但存在 `2/10` 个样本变差。
+- 当前结果说明轨迹先验在小规模同 scene 实验中有效，跨 scene 有初步正向信号但还不够稳。
+- 下一步建议进行中等规模多 scene 阶段六训练，并启用 alignment EPE 安全过滤，再决定是否进入阶段七跨轨迹注意力。

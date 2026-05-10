@@ -1,0 +1,1264 @@
+From f6cb995157fb39dc7b5670e1bcdbf05bb1c341a2 Mon Sep 17 00:00:00 2001
+From: aqiua94 <aqiua94@users.noreply.github.com>
+Date: Sun, 10 May 2026 17:17:19 +0800
+Subject: [PATCH] =?UTF-8?q?=E6=8F=90=E4=BA=A4=E6=89=80=E6=9C=89=E4=BB=A3?=
+ =?UTF-8?q?=E7=A0=81=E4=BF=AE=E6=94=B9=EF=BC=8C=E6=8E=92=E9=99=A4=E5=A4=A7?=
+ =?UTF-8?q?=E5=9E=8B=E8=AE=AD=E7=BB=83=E5=8F=82=E6=95=B0=E5=92=8C=E6=95=B0?=
+ =?UTF-8?q?=E6=8D=AE=E9=9B=86=EF=BC=88=E6=9B=B4=E6=96=B0=20.gitignore?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .gitignore                                    |   6 +
+ demo_pair.py                                  |  16 +-
+ ...set_preparation_for_track_guided_fusion.md |  23 +
+ ...rack_guided_demo_outputs_and_code_index.md | 554 ++++++++++++++++++
+ evaluate_track_guided.py                      | 166 ++++++
+ scripts/precompute_track_guided_from_pairs.py | 221 +++++++
+ .../prepare_sintel_track_guided_manifest.py   | 180 ++++++
+ 7 files changed, 1165 insertions(+), 1 deletion(-)
+ create mode 100644 docs/track_guided_demo_outputs_and_code_index.md
+ create mode 100644 evaluate_track_guided.py
+ create mode 100644 scripts/precompute_track_guided_from_pairs.py
+ create mode 100644 scripts/prepare_sintel_track_guided_manifest.py
+
+diff --git a/.gitignore b/.gitignore
+index ce33f61..3b25f9c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -17,3 +17,9 @@ demo_fusion_outputs/
+ *.npy
+ *.npz
+ *.ckpt
++# precomputed outputs and large caches
++precomputed/
++
++# Python bytecode caches
++__pycache__/
++*.pyc
+diff --git a/demo_pair.py b/demo_pair.py
+index b8df8b2..cc56dfa 100644
+--- a/demo_pair.py
++++ b/demo_pair.py
+@@ -45,6 +45,18 @@ def resize_pair(image1, image2, max_size):
+     return image1, image2, scale
+ 
+ 
++def resize_flow_to_shape(flow, target_shape, source_shape):
++    target_height, target_width = target_shape
++    source_height, source_width = source_shape
++    if (source_height, source_width) == (target_height, target_width):
++        return flow
++
++    flow = F.interpolate(flow, size=(target_height, target_width), mode="bilinear", align_corners=False)
++    flow[:, 0] *= float(target_width) / float(source_width)
++    flow[:, 1] *= float(target_height) / float(source_height)
++    return flow
++
++
+ @torch.no_grad()
+ def run_flow(args, model, image1, image2):
+     if args.input_scale != 0:
+@@ -84,7 +96,9 @@ def main():
+     if image1.shape[-2:] != image2.shape[-2:]:
+         raise ValueError(f"Input image sizes differ: {image1.shape[-2:]} vs {image2.shape[-2:]}")
+ 
++    original_shape = image1.shape[-2:]
+     image1, image2, resize_scale = resize_pair(image1, image2, args.max_size)
++    resized_shape = image1.shape[-2:]
+     image1 = image1.cuda()
+     image2 = image2.cuda()
+ 
+@@ -94,7 +108,7 @@ def main():
+ 
+     flow = run_flow(args, model, image1, image2)
+     if resize_scale != 1.0:
+-        flow = F.interpolate(flow, scale_factor=1.0 / resize_scale, mode="bilinear", align_corners=False) / resize_scale
++        flow = resize_flow_to_shape(flow, original_shape, resized_shape)
+ 
+     flow_np = flow[0].permute(1, 2, 0).detach().cpu().numpy()
+     np.save(os.path.join(args.output_dir, "flow.npy"), flow_np)
+diff --git a/docs/dataset_preparation_for_track_guided_fusion.md b/docs/dataset_preparation_for_track_guided_fusion.md
+index dd700a3..8be1a30 100644
+--- a/docs/dataset_preparation_for_track_guided_fusion.md
++++ b/docs/dataset_preparation_for_track_guided_fusion.md
+@@ -186,6 +186,29 @@ PY
+ 
+ ## 9. 预计算流程
+ 
++当前新增了一个轻量准备脚本，用于在数据放好后先生成训练 manifest、样本路径清单，并把 Sintel `.flo` GT 转成 `.npy`：
++
++```shell
++/root/miniconda3/envs/flowseek/bin/python scripts/prepare_sintel_track_guided_manifest.py \
++  --sintel_root data/MPI-Sintel \
++  --dstype clean \
++  --scenes alley_1 \
++  --max_pairs 20 \
++  --output_root precomputed/track_guided_sintel_clean \
++  --manifest precomputed/track_guided_sintel_clean/manifest.json
++```
++
++输出：
++
++```text
++precomputed/track_guided_sintel_clean/manifest.json
++precomputed/track_guided_sintel_clean/manifest_pairs.json
++precomputed/track_guided_sintel_clean/<scene>/<scene>_<frame>/gt_flow.npy
++precomputed/track_guided_sintel_clean/<scene>/<scene>_<frame>/valid.npy
++```
++
++其中 `manifest.json` 是 `train_track_guided.py` 的输入；`manifest_pairs.json` 记录每个样本的原始图片路径和各阶段预计算输出目录，供后续批处理脚本使用。
++
+ 对每个 Sintel 相邻帧样本执行：
+ 
+ 1. 使用 `demo_pair.py` 或后续批处理脚本生成 FlowSeek 初始光流：
+diff --git a/docs/track_guided_demo_outputs_and_code_index.md b/docs/track_guided_demo_outputs_and_code_index.md
+new file mode 100644
+index 0000000..4e7f1df
+--- /dev/null
++++ b/docs/track_guided_demo_outputs_and_code_index.md
+@@ -0,0 +1,554 @@
++# Track-Guided Flow Demo 产物与代码索引
++
++本文档说明当前仓库中为“基于点跟踪改进 FlowSeek 光流”实验新增的代码入口、demo 输出目录、Sintel 预计算目录、训练结果和验证结果。重点解释每个图片文件来自哪一步、表达什么含义，以及每个脚本完成哪一阶段功能。
++
++## 1. 阶段与代码对应关系
++
++### 阶段一：FlowSeek 两帧推理
++
++- `demo_pair.py`
++  - 功能：读取两张连续帧，加载 FlowSeek 权重，输出初始稠密光流 `F_0`。
++  - 输入：`--image1`、`--image2`、`--cfg`、`--model`。
++  - 输出：`flow.npy` 和 `flow_vis.png`。
++  - 注意：该脚本已修正 resize 还原逻辑，确保 Sintel 原图 `436 x 1024` 的输出光流仍为 `(436, 1024, 2)`，不会因为缩放舍入变成 `437 x 1024`。
++
++### 阶段二：CoTracker3 点跟踪
++
++- `demo_cotracker_pair.py`
++  - 功能：读取两帧或短序列图像，以及 `[t, x, y]` 格式查询点，调用 CoTracker3 offline 模型输出轨迹。
++  - 输入：`--frames`、可选 `--queries`。
++  - 输出：`tracks.npy`、`visibility.npy`、`confidence.npy`、`track_0000.png`、`track_0001.png`。
++  - 当前 `confidence.npy` 暂用 visibility 的 float 版本占位。
++
++### 阶段三：FlowSeek 引导的自适应采样
++
++- `core/track_guidance/sampler.py`
++  - 功能：根据 FlowSeek 光流梯度、运动幅值和可选图像边缘，生成稀疏采样点。
++  - 主要输出：采样点坐标、采样权重、完整采样权重图。
++
++- `demo_adaptive_sampler.py`
++  - 功能：命令行入口，读取 `flow.npy` 和可选图像，调用 sampler，保存 CoTracker 可直接读取的 `queries.csv`。
++  - 输出：`points.npy`、`point_weights.npy`、`sampling_weight.npy`、`sampling_weight.png`、`sampled_points.png`、`queries.csv`。
++
++### 阶段四：轨迹与 FlowSeek 光流对齐
++
++- `core/track_guidance/cotracker_wrapper.py`
++  - 功能：把 CoTracker 输出轨迹转换为相邻帧稀疏位移，双线性采样 FlowSeek 稠密光流，并计算二者 EPE。
++
++- `demo_track_flow_alignment.py`
++  - 功能：命令行入口，对同一点处的 CoTracker 稀疏位移和 FlowSeek 光流进行对齐检查。
++  - 输出：`points.npy`、`next_points.npy`、`track_flow.npy`、`flowseek_at_points.npy`、`valid_mask.npy`、`confidence.npy`、`endpoint_error.npy`、`alignment_stats.json`、`alignment_overlay.png`。
++
++### 阶段五：轨迹先验栅格化
++
++- `core/track_guidance/rasterizer.py`
++  - 功能：把稀疏轨迹位移写入与光流同尺寸的五通道图 `G_track`。
++  - 当前通道顺序：`[dx, dy, confidence, visibility, distance_to_nearest_track]`。
++
++- `demo_track_prior_rasterizer.py`
++  - 功能：命令行入口，读取阶段四输出，生成 `G_track` 及可视化。
++  - 输出：`g_track.npy`、`g_track_stats.json`、`g_track_magnitude.png`、`g_track_confidence.png`、`g_track_distance.png`。
++
++### 阶段六：后处理式 FusionNet 训练
++
++- `core/track_guidance/fusion_net.py`
++  - 功能：轻量 U-Net 风格后处理网络。
++  - 输入：`F_0` 和 `G_track`。
++  - 输出：`Delta F`、`gate`、`F_refined = F_0 + gate * Delta F`。
++
++- `core/track_guidance/losses.py`
++  - 功能：定义监督光流 L1、EPE、轨迹点约束 loss 和 smoothness loss。
++
++- `train_track_guided.py`
++  - 功能：读取预计算 manifest，训练 FusionNet。
++  - 输入 manifest 每个样本包含：`initial_flow`、`track_prior`、`gt_flow`、`valid`。
++  - 输出：`fusion_net_smoke.pth`、`train_history.json`。
++
++### Sintel 数据准备与批处理
++
++- `scripts/prepare_sintel_track_guided_manifest.py`
++  - 功能：枚举 Sintel 相邻帧样本，创建预计算目录，把 `.flo` 真值光流转成 `gt_flow.npy`，并生成 manifest。
++  - 输出：`manifest.json` 和 `manifest_pairs.json`。
++  - 关键参数：
++    - `--scenes alley_1`：只取指定 scene。
++    - `--start_index`：跳过前若干对样本，用于拆训练/验证。
++    - `--max_pairs`：限制样本数量。
++
++- `scripts/precompute_track_guided_from_pairs.py`
++  - 功能：读取 `manifest_pairs.json`，按样本批量执行阶段一到阶段五。
++  - 具体顺序：FlowSeek 推理 -> 自适应采样 -> CoTracker 跟踪 -> 轨迹对齐 -> 栅格化 `G_track`。
++  - 默认支持断点续跑：如果某一步产物已经存在，会跳过该步骤。
++
++### 训练结果验证
++
++- `evaluate_track_guided.py`
++  - 功能：加载训练好的 FusionNet checkpoint，对 manifest 中样本逐个比较 `F_0` 和 `F_refined` 相对 GT 的 EPE。
++  - 输出：`metrics.json`、`refined_flow.npy`、`delta_flow.npy`、`gate.npy`、多种可视化图片。
++
++## 2. 合成 smoke demo 产物
++
++这些目录来自最早的两帧合成平移样例，主要用于确认每个阶段的最小链路正确。
++
++### `demo_pair_inputs/`
++
++- `frame_0001.png`
++  - 来源：阶段一合成输入第一帧。
++  - 含义：用于制造已知水平平移的测试图。
++
++- `frame_0002.png`
++  - 来源：阶段一合成输入第二帧。
++  - 含义：由第一帧水平平移约 12 像素得到，用于检查 FlowSeek 和 CoTracker 输出方向是否合理。
++
++### `demo_pair_outputs/stage1_smoke/`
++
++- `flow.npy`
++  - 来源：`demo_pair.py`。
++  - 含义：FlowSeek 对合成两帧输出的初始稠密光流，形状为 `(216, 384, 2)`。
++
++- `flow_vis.png`
++  - 来源：`demo_pair.py` 对 `flow.npy` 做光流颜色编码。
++  - 含义：阶段一结果图，用颜色显示光流方向和幅值；合成平移测试中应表现为主要水平运动。
++
++### `demo_cotracker_outputs/stage2_smoke/`
++
++- `tracks.npy`
++  - 来源：`demo_cotracker_pair.py`。
++  - 含义：手工指定少量查询点后，CoTracker 输出的轨迹，形状为 `(T, N, 2)`。
++
++- `visibility.npy`
++  - 来源：`demo_cotracker_pair.py`。
++  - 含义：每个点在每帧是否可见。
++
++- `confidence.npy`
++  - 来源：`demo_cotracker_pair.py`。
++  - 含义：当前版本为 visibility 的 float 占位，用于后续统一接口。
++
++- `queries.csv`
++  - 来源：`demo_cotracker_pair.py`。
++  - 含义：CoTracker 查询点，列为 `[t, x, y]`。
++
++- `track_0000.png`、`track_0001.png`
++  - 来源：`demo_cotracker_pair.py`。
++  - 含义：阶段二结果图；在第 0/1 帧上叠加点编号和轨迹线，用于目视检查跟踪是否跟随合成平移。
++
++### `demo_sampler_outputs/stage3_smoke/`
++
++- `points.npy`
++  - 来源：`demo_adaptive_sampler.py`。
++  - 含义：自适应采样得到的 `(x, y)` 点坐标。
++
++- `point_weights.npy`
++  - 来源：`demo_adaptive_sampler.py`。
++  - 含义：每个采样点的权重，来自光流梯度和运动幅值融合。
++
++- `sampling_weight.npy`
++  - 来源：`demo_adaptive_sampler.py`。
++  - 含义：整张图的采样权重图。
++
++- `queries.csv`
++  - 来源：`demo_adaptive_sampler.py`。
++  - 含义：把 `points.npy` 转成 CoTracker 查询格式 `[t, x, y]`。
++
++- `sampling_weight.png`
++  - 来源：`demo_adaptive_sampler.py`。
++  - 含义：阶段三结果图；权重热力图，颜色越强表示越容易被采样。
++
++- `sampled_points.png`
++  - 来源：`demo_adaptive_sampler.py`。
++  - 含义：阶段三结果图；在输入图上画出最终采样点，用于检查覆盖范围和点密度。
++
++### `demo_cotracker_outputs/stage3_sampler_check/`
++
++- `tracks.npy`、`visibility.npy`、`confidence.npy`
++  - 来源：把阶段三的 `queries.csv` 输入 `demo_cotracker_pair.py`。
++  - 含义：验证自适应采样点可以直接进入 CoTracker。
++
++- `track_0000.png`、`track_0001.png`
++  - 来源：`demo_cotracker_pair.py`。
++  - 含义：阶段三到阶段二联通性检查图，显示自动采样点的跟踪结果。
++
++### `demo_alignment_outputs/stage4_smoke/`
++
++- `points.npy`
++  - 来源：`demo_track_flow_alignment.py`。
++  - 含义：每条轨迹在当前帧的起点。
++
++- `next_points.npy`
++  - 来源：`demo_track_flow_alignment.py`。
++  - 含义：同一轨迹在下一帧的位置。
++
++- `track_flow.npy`
++  - 来源：`next_points - points`。
++  - 含义：CoTracker 轨迹转成的稀疏光流。
++
++- `flowseek_at_points.npy`
++  - 来源：在 `points.npy` 位置双线性采样 FlowSeek `flow.npy`。
++  - 含义：与 `track_flow.npy` 对齐比较的 FlowSeek 稠密光流采样值。
++
++- `valid_mask.npy`
++  - 来源：可见性、置信度和边界检查。
++  - 含义：哪些轨迹点可以作为有效先验。
++
++- `endpoint_error.npy`
++  - 来源：`track_flow` 与 `flowseek_at_points` 的逐点 EPE。
++  - 含义：阶段四对齐误差。
++
++- `alignment_stats.json`
++  - 来源：`demo_track_flow_alignment.py`。
++  - 含义：有效点数量、平均位移、EPE 均值/中位数/最大值等统计。
++
++- `alignment_overlay.png`
++  - 来源：`demo_track_flow_alignment.py`。
++  - 含义：阶段四结果图；绿色箭头表示 CoTracker 轨迹位移，红色箭头表示 FlowSeek 采样光流，用于检查坐标、方向、尺度是否一致。
++
++### `demo_rasterizer_outputs/stage5_smoke/`
++
++- `g_track.npy`
++  - 来源：`demo_track_prior_rasterizer.py`。
++  - 含义：阶段五输出的五通道轨迹先验图，默认形状 `(H, W, 5)`。
++
++- `g_track_stats.json`
++  - 来源：`demo_track_prior_rasterizer.py`。
++  - 含义：输入有效点数量、实际栅格化像素数量、距离图统计等。
++
++- `g_track_magnitude.png`
++  - 来源：`demo_track_prior_rasterizer.py`。
++  - 含义：阶段五结果图；显示 `G_track` 中轨迹位移幅值，只有有效轨迹附近有非零响应。
++
++- `g_track_confidence.png`
++  - 来源：`demo_track_prior_rasterizer.py`。
++  - 含义：阶段五结果图；显示轨迹先验置信度通道。
++
++- `g_track_distance.png`
++  - 来源：`demo_track_prior_rasterizer.py`。
++  - 含义：阶段五结果图；显示每个像素到最近有效轨迹点的距离。
++
++### `demo_fusion_outputs/stage6_smoke/`
++
++- `stage6_smoke_manifest.json`
++  - 来源：`train_track_guided.py` 在未提供 manifest 时自动生成。
++  - 含义：合成 smoke 样本的训练 manifest。
++
++- `fusion_net_smoke.pth`
++  - 来源：`train_track_guided.py`。
++  - 含义：阶段六合成样例训练得到的 FusionNet checkpoint。
++
++- `train_history.json`
++  - 来源：`train_track_guided.py`。
++  - 含义：阶段六合成样例训练 loss 历史。
++
++## 3. Sintel 真实数据预计算目录
++
++真实训练和验证使用了 Sintel `training/clean/alley_1`。
++
++### `precomputed/track_guided_sintel_clean_20/`
++
++用途：训练集预计算目录。对应 `alley_1` 前 20 对相邻帧：
++
++```text
++frame_0001 -> frame_0002
++...
++frame_0020 -> frame_0021
++```
++
++- `manifest.json`
++  - 来源：`scripts/prepare_sintel_track_guided_manifest.py`。
++  - 含义：`train_track_guided.py` 和 `evaluate_track_guided.py` 使用的训练 manifest。每个样本记录 `initial_flow`、`track_prior`、`gt_flow`、`valid`。
++
++- `manifest_pairs.json`
++  - 来源：`scripts/prepare_sintel_track_guided_manifest.py`。
++  - 含义：批处理预计算使用的样本清单，包含原始 `image1`、`image2`、`.flo` GT 路径和各阶段输出目录。
++
++每个样本目录形如：
++
++```text
++precomputed/track_guided_sintel_clean_20/alley_1/alley_1_frame_0001/
++```
++
++其子目录含义：
++
++- `gt_flow.npy`
++  - 来源：Sintel `training/flow/alley_1/frame_0001.flo` 转换。
++  - 含义：真实光流 GT，监督训练和 EPE 验证使用。
++
++- `valid.npy`
++  - 来源：`.flo` 中有限值检查。
++  - 含义：有效像素 mask，Sintel 第一版基本为全有效。
++
++- `flowseek/flow.npy`
++  - 来源：`demo_pair.py`。
++  - 含义：该帧对的 FlowSeek 初始稠密光流 `F_0`。
++
++- `flowseek/flow_vis.png`
++  - 来源：`demo_pair.py`。
++  - 含义：真实 Sintel 帧对的 FlowSeek 初始光流可视化，是阶段一在真实数据上的结果图。
++
++- `sampler/points.npy`
++  - 来源：`demo_adaptive_sampler.py`。
++  - 含义：基于该样本 `F_0` 自动采样的点。
++
++- `sampler/sampling_weight.png`
++  - 来源：`demo_adaptive_sampler.py`。
++  - 含义：阶段三在真实数据上的采样权重热力图。
++
++- `sampler/sampled_points.png`
++  - 来源：`demo_adaptive_sampler.py`。
++  - 含义：阶段三在真实 Sintel 图像上叠加采样点的结果图。
++
++- `sampler/queries.csv`
++  - 来源：`points.npy` 转换。
++  - 含义：给 CoTracker 使用的 `[t, x, y]` 查询点。
++
++- `cotracker/tracks.npy`
++  - 来源：`demo_cotracker_pair.py`。
++  - 含义：真实 Sintel 帧对上的 CoTracker 轨迹。
++
++- `cotracker/visibility.npy`
++  - 来源：`demo_cotracker_pair.py`。
++  - 含义：轨迹点可见性。
++
++- `cotracker/confidence.npy`
++  - 来源：`demo_cotracker_pair.py`。
++  - 含义：当前为 visibility float 占位。
++
++- `cotracker/track_0000.png`、`cotracker/track_0001.png`
++  - 来源：`demo_cotracker_pair.py`。
++  - 含义：阶段二在真实数据上的轨迹可视化；分别显示第一帧和第二帧上的轨迹点/轨迹线。
++
++- `alignment/track_flow.npy`
++  - 来源：`demo_track_flow_alignment.py`。
++  - 含义：由 CoTracker 轨迹转换得到的稀疏光流。
++
++- `alignment/flowseek_at_points.npy`
++  - 来源：`demo_track_flow_alignment.py`。
++  - 含义：在相同轨迹起点处采样的 FlowSeek 光流。
++
++- `alignment/alignment_stats.json`
++  - 来源：`demo_track_flow_alignment.py`。
++  - 含义：该样本轨迹和 FlowSeek 的对齐统计。训练集 20 对样本中，有效轨迹通常约为 `115-125 / 128`。
++
++- `alignment/alignment_overlay.png`
++  - 来源：`demo_track_flow_alignment.py`。
++  - 含义：阶段四真实数据对齐图；绿箭头为轨迹位移，红箭头为 FlowSeek 位移。
++
++- `rasterizer/g_track.npy`
++  - 来源：`demo_track_prior_rasterizer.py`。
++  - 含义：训练 FusionNet 的轨迹先验 `G_track`。
++
++- `rasterizer/g_track_magnitude.png`
++  - 来源：`demo_track_prior_rasterizer.py`。
++  - 含义：真实数据轨迹先验中的位移幅值图。
++
++- `rasterizer/g_track_confidence.png`
++  - 来源：`demo_track_prior_rasterizer.py`。
++  - 含义：真实数据轨迹先验中的置信度图。
++
++- `rasterizer/g_track_distance.png`
++  - 来源：`demo_track_prior_rasterizer.py`。
++  - 含义：真实数据轨迹先验中的最近轨迹点距离图。
++
++- `rasterizer/g_track_stats.json`
++  - 来源：`demo_track_prior_rasterizer.py`。
++  - 含义：该样本 `G_track` 的点数和距离统计。
++
++### `precomputed/track_guided_sintel_clean_val10/`
++
++用途：held-out 验证集预计算目录。对应 `alley_1` 后 10 对相邻帧：
++
++```text
++frame_0021 -> frame_0022
++...
++frame_0030 -> frame_0031
++```
++
++该目录结构与 `precomputed/track_guided_sintel_clean_20/` 完全一致。区别是这些样本没有参与 `demo_fusion_outputs/sintel_clean_20/fusion_net_smoke.pth` 的训练，用于检查同一 scene 后续帧上的泛化能力。
++
++### `precomputed/track_guided_sintel_clean_smoke/`
++
++用途：真实 Sintel 最小 smoke 测试目录。最早使用 `alley_1` 的 2 对样本检查 manifest、GT 转换、FlowSeek、采样、CoTracker、对齐、栅格化和单样本/双样本训练是否能跑通。
++
++## 4. 训练输出目录
++
++### `demo_fusion_outputs/sintel_clean_20/`
++
++- `fusion_net_smoke.pth`
++  - 来源：`train_track_guided.py`。
++  - 含义：使用 `precomputed/track_guided_sintel_clean_20/manifest.json` 训练 500 步得到的 FusionNet checkpoint。
++  - 训练配置要点：`hidden_dim=32`，`lambda_flow=1.0`，`lambda_track=0.2`，`lambda_smooth=0.001`，`batch_size=1`。
++
++- `train_history.json`
++  - 来源：`train_track_guided.py`。
++  - 含义：500 步训练历史，每步记录 `flow_l1`、`epe`、`initial_epe`、`track_l1`、`smoothness`、`total`。
++  - 当前训练摘要：
++    - 初始 total loss：`0.325839`
++    - 最终 total loss：`0.297172`
++    - 最优 total loss：`0.219942`，出现在 step `421`
++
++### 其他训练 smoke 目录
++
++- `demo_fusion_outputs/stage6_smoke_rerun/`
++  - 来源：重新运行合成样例阶段六 smoke。
++  - 含义：确认 FusionNet 训练链路稳定，loss 从 `0.049833` 降到 `0.039587`。
++
++- `demo_fusion_outputs/sintel_clean_smoke_one_sample/`
++  - 来源：真实 Sintel 单样本监督训练 smoke。
++  - 含义：验证 `gt_flow.npy`、`valid.npy`、`F_0`、`G_track` 能被训练脚本正确读取。
++
++- `demo_fusion_outputs/sintel_clean_smoke_2samples/`
++  - 来源：真实 Sintel 两样本监督训练 smoke。
++  - 含义：验证 DataLoader 能批量读取多个真实预计算样本。
++
++## 5. 训练集内验证输出
++
++目录：
++
++```text
++demo_fusion_outputs/sintel_clean_20_eval/
++```
++
++来源：`evaluate_track_guided.py` 使用训练好的 checkpoint `demo_fusion_outputs/sintel_clean_20/fusion_net_smoke.pth`，在训练 manifest `precomputed/track_guided_sintel_clean_20/manifest.json` 上评估。
++
++### 指标文件
++
++- `metrics.json`
++  - 来源：`evaluate_track_guided.py`。
++  - 含义：训练集内 20 个样本逐样本 EPE 和整体均值。
++  - 当前结果：
++    - `mean_initial_epe = 0.420434`
++    - `mean_refined_epe = 0.397553`
++    - `mean_epe_delta = -0.022881`
++    - `num_improved = 20`
++    - `num_worse = 0`
++
++### 可视化样本目录
++
++目录形如：
++
++```text
++demo_fusion_outputs/sintel_clean_20_eval/sample_0000/
++...
++demo_fusion_outputs/sintel_clean_20_eval/sample_0005/
++```
++
++每个目录里的文件含义：
++
++- `refined_flow.npy`
++  - 来源：`evaluate_track_guided.py` 调用 FusionNet。
++  - 含义：模型输出的 refined flow，即 `F_refined`。
++
++- `delta_flow.npy`
++  - 来源：FusionNet 的 `delta_head`。
++  - 含义：模型预测的残差光流 `Delta F`。
++
++- `gate.npy`
++  - 来源：FusionNet 的 `gate_head`。
++  - 含义：门控图，控制 `Delta F` 对原始光流的影响强度。
++
++- `initial_flow_vis.png`
++  - 来源：对预计算 `F_0` 做光流颜色编码。
++  - 含义：验证前的 FlowSeek 初始光流图。
++
++- `refined_flow_vis.png`
++  - 来源：对 `F_refined` 做光流颜色编码。
++  - 含义：FusionNet 修正后的光流图。
++
++- `gt_flow_vis.png`
++  - 来源：对 Sintel GT flow 做光流颜色编码。
++  - 含义：真实光流参考图。
++
++- `initial_error.png`
++  - 来源：计算 `||F_0 - F_gt||_2` 后做热力图。
++  - 含义：FlowSeek 初始光流误差图，颜色越强误差越大。
++
++- `refined_error.png`
++  - 来源：计算 `||F_refined - F_gt||_2` 后做热力图。
++  - 含义：FusionNet 修正后误差图。
++
++- `improvement.png`
++  - 来源：计算 `initial_error - refined_error`，只显示正向改善部分。
++  - 含义：哪里 refined flow 比 initial flow 更接近 GT；颜色越强表示改善越大。
++
++## 6. Held-Out 验证输出
++
++目录：
++
++```text
++demo_fusion_outputs/sintel_clean_val10_eval/
++```
++
++来源：`evaluate_track_guided.py` 使用同一个训练 checkpoint，在未参与训练的验证 manifest `precomputed/track_guided_sintel_clean_val10/manifest.json` 上评估。
++
++### 指标文件
++
++- `metrics.json`
++  - 来源：`evaluate_track_guided.py`。
++  - 含义：held-out 验证集 10 个样本逐样本 EPE 和整体均值。
++  - 当前结果：
++    - `mean_initial_epe = 0.526242`
++    - `mean_refined_epe = 0.512189`
++    - `mean_epe_delta = -0.014054`
++    - `num_improved = 10`
++    - `num_worse = 0`
++
++这说明当前模型不仅在训练集内有效，在同一 scene 后续未训练帧上也有小幅改善。因为验证集仍来自 `alley_1`，该结果还不能代表跨场景泛化。
++
++### 可视化样本目录
++
++目录形如：
++
++```text
++demo_fusion_outputs/sintel_clean_val10_eval/sample_0000/
++...
++demo_fusion_outputs/sintel_clean_val10_eval/sample_0005/
++```
++
++每个目录中的文件含义与训练集内验证一致：
++
++- `initial_flow_vis.png`：验证样本的 FlowSeek 初始光流图。
++- `refined_flow_vis.png`：FusionNet 修正后的光流图。
++- `gt_flow_vis.png`：Sintel GT 光流图。
++- `initial_error.png`：初始光流相对 GT 的误差热力图。
++- `refined_error.png`：修正后光流相对 GT 的误差热力图。
++- `improvement.png`：误差下降区域图。
++- `refined_flow.npy`：修正后的光流数组。
++- `delta_flow.npy`：预测残差。
++- `gate.npy`：门控图。
++
++## 7. 推荐查看顺序
++
++如果只想快速确认整条方法是否有效，建议按下面顺序查看：
++
++1. `demo_pair_outputs/stage1_smoke/flow_vis.png`
++   - 确认 FlowSeek 初始光流推理链路正常。
++
++2. `demo_sampler_outputs/stage3_smoke/sampled_points.png`
++   - 确认自适应采样点覆盖图像，并偏向运动边界或高权重区域。
++
++3. `demo_alignment_outputs/stage4_smoke/alignment_overlay.png`
++   - 确认 CoTracker 稀疏位移和 FlowSeek 光流坐标系一致。
++
++4. `demo_rasterizer_outputs/stage5_smoke/g_track_magnitude.png`
++   - 确认轨迹先验已被正确写成图像网格张量。
++
++5. `precomputed/track_guided_sintel_clean_20/alley_1/alley_1_frame_0001/flowseek/flow_vis.png`
++   - 查看真实 Sintel 样本上的 FlowSeek 初始光流。
++
++6. `precomputed/track_guided_sintel_clean_20/alley_1/alley_1_frame_0001/alignment/alignment_overlay.png`
++   - 查看真实 Sintel 样本上的轨迹/光流对齐。
++
++7. `demo_fusion_outputs/sintel_clean_20_eval/sample_0000/initial_error.png` 与 `refined_error.png`
++   - 对比训练集内修正前后的误差。
++
++8. `demo_fusion_outputs/sintel_clean_val10_eval/sample_0000/initial_error.png` 与 `refined_error.png`
++   - 对比 held-out 验证集修正前后的误差。
++
++9. `demo_fusion_outputs/sintel_clean_val10_eval/metrics.json`
++   - 查看未参与训练样本上的定量改善。
++
++## 8. 当前结论
++
++- 合成 smoke：阶段一到阶段六全部跑通。
++- Sintel 训练集 20 对：预计算、训练和训练集内验证全部跑通。
++- Sintel held-out 验证集 10 对：全部样本 refined EPE 低于 initial EPE。
++- 当前结果说明轨迹先验在小规模同 scene 实验中有效。
++- 下一步如果要验证泛化能力，应使用不同 scene 作为验证集，例如用 `alley_1` 训练，用 `ambush_2`、`bamboo_1` 或其他 scene 做 held-out 验证。
+diff --git a/evaluate_track_guided.py b/evaluate_track_guided.py
+new file mode 100644
+index 0000000..a04ecba
+--- /dev/null
++++ b/evaluate_track_guided.py
+@@ -0,0 +1,166 @@
++import argparse
++import json
++from pathlib import Path
++
++import cv2
++import numpy as np
++import torch
++
++from core.track_guidance.fusion_net import TrackGuidedFusionNet
++from core.utils.flow_viz import flow_to_image
++from train_track_guided import PrecomputedTrackGuidedDataset
++
++
++def flow_epe(flow, gt_flow, valid):
++    epe = np.linalg.norm(flow - gt_flow, axis=2)
++    valid = valid.astype(bool)
++    if valid.sum() == 0:
++        return float("nan")
++    return float(epe[valid].mean())
++
++
++def flow_l1(flow, gt_flow, valid):
++    l1 = np.abs(flow - gt_flow).mean(axis=2)
++    valid = valid.astype(bool)
++    if valid.sum() == 0:
++        return float("nan")
++    return float(l1[valid].mean())
++
++
++def save_error_map(path, error, valid=None):
++    error = error.astype(np.float32)
++    if valid is not None:
++        shown = error.copy()
++        shown[~valid.astype(bool)] = 0.0
++    else:
++        shown = error
++    vmax = float(np.percentile(shown[shown > 0], 95)) if np.any(shown > 0) else 1.0
++    normalized = np.clip(shown / max(vmax, 1e-6), 0.0, 1.0)
++    image = (normalized * 255.0).astype(np.uint8)
++    image = cv2.applyColorMap(image, cv2.COLORMAP_TURBO)
++    cv2.imwrite(str(path), image)
++
++
++def save_flow_vis(path, flow):
++    image = flow_to_image(flow.astype(np.float32), convert_to_bgr=True)
++    cv2.imwrite(str(path), image)
++
++
++def load_model(checkpoint_path, device, hidden_dim=None):
++    checkpoint = torch.load(checkpoint_path, map_location=device)
++    ckpt_args = checkpoint.get("args", {})
++    if hidden_dim is None:
++        hidden_dim = int(ckpt_args.get("hidden_dim", 32))
++    model = TrackGuidedFusionNet(hidden_dim=hidden_dim).to(device)
++    model.load_state_dict(checkpoint["model"])
++    model.eval()
++    return model, hidden_dim
++
++
++def tensor_to_flow_hwc(tensor):
++    return tensor.detach().cpu().numpy().transpose(1, 2, 0).astype(np.float32)
++
++
++def evaluate(args):
++    output_dir = Path(args.output_dir)
++    output_dir.mkdir(parents=True, exist_ok=True)
++
++    device = torch.device(args.device)
++    model, hidden_dim = load_model(args.checkpoint, device=device, hidden_dim=args.hidden_dim)
++    dataset = PrecomputedTrackGuidedDataset(args.manifest)
++
++    records = []
++    with torch.no_grad():
++        for index in range(len(dataset)):
++            item = dataset[index]
++            initial_flow = item["initial_flow"][None].to(device)
++            track_prior = item["track_prior"][None].to(device)
++            gt_flow = item.get("gt_flow")
++            valid = item.get("valid")
++            if gt_flow is None:
++                raise ValueError("Evaluation requires gt_flow in the manifest.")
++            if valid is None:
++                valid = torch.ones(gt_flow.shape[-2:], dtype=torch.float32)
++
++            output = model(initial_flow, track_prior)
++            refined_flow_t = output["refined_flow"][0]
++            delta_flow_t = output["delta_flow"][0]
++            gate_t = output["gate"][0, 0]
++
++            initial_np = tensor_to_flow_hwc(item["initial_flow"])
++            refined_np = tensor_to_flow_hwc(refined_flow_t)
++            gt_np = tensor_to_flow_hwc(gt_flow)
++            valid_np = valid.detach().cpu().numpy().astype(bool)
++            delta_np = tensor_to_flow_hwc(delta_flow_t)
++            gate_np = gate_t.detach().cpu().numpy().astype(np.float32)
++
++            initial_error = np.linalg.norm(initial_np - gt_np, axis=2)
++            refined_error = np.linalg.norm(refined_np - gt_np, axis=2)
++            improvement = initial_error - refined_error
++
++            record = {
++                "index": index,
++                "initial_epe": flow_epe(initial_np, gt_np, valid_np),
++                "refined_epe": flow_epe(refined_np, gt_np, valid_np),
++                "initial_l1": flow_l1(initial_np, gt_np, valid_np),
++                "refined_l1": flow_l1(refined_np, gt_np, valid_np),
++                "delta_mean_abs": float(np.abs(delta_np).mean()),
++                "gate_mean": float(gate_np.mean()),
++                "gate_max": float(gate_np.max()),
++            }
++            record["epe_delta"] = record["refined_epe"] - record["initial_epe"]
++            records.append(record)
++
++            if index < args.num_visualizations:
++                sample_dir = output_dir / f"sample_{index:04d}"
++                sample_dir.mkdir(parents=True, exist_ok=True)
++                np.save(sample_dir / "refined_flow.npy", refined_np)
++                np.save(sample_dir / "delta_flow.npy", delta_np)
++                np.save(sample_dir / "gate.npy", gate_np)
++                save_flow_vis(sample_dir / "initial_flow_vis.png", initial_np)
++                save_flow_vis(sample_dir / "refined_flow_vis.png", refined_np)
++                save_flow_vis(sample_dir / "gt_flow_vis.png", gt_np)
++                save_error_map(sample_dir / "initial_error.png", initial_error, valid_np)
++                save_error_map(sample_dir / "refined_error.png", refined_error, valid_np)
++                save_error_map(sample_dir / "improvement.png", np.maximum(improvement, 0.0), valid_np)
++
++    initial_epes = np.asarray([r["initial_epe"] for r in records], dtype=np.float32)
++    refined_epes = np.asarray([r["refined_epe"] for r in records], dtype=np.float32)
++    summary = {
++        "checkpoint": str(args.checkpoint),
++        "manifest": str(args.manifest),
++        "hidden_dim": hidden_dim,
++        "num_samples": len(records),
++        "mean_initial_epe": float(initial_epes.mean()),
++        "mean_refined_epe": float(refined_epes.mean()),
++        "mean_epe_delta": float((refined_epes - initial_epes).mean()),
++        "num_improved": int((refined_epes < initial_epes).sum()),
++        "num_worse": int((refined_epes > initial_epes).sum()),
++        "samples": records,
++    }
++
++    with open(output_dir / "metrics.json", "w", encoding="utf-8") as f:
++        json.dump(summary, f, indent=2)
++
++    print(f"Evaluated {summary['num_samples']} samples.")
++    print(f"Mean initial EPE: {summary['mean_initial_epe']:.6f}")
++    print(f"Mean refined EPE: {summary['mean_refined_epe']:.6f}")
++    print(f"Mean EPE delta:   {summary['mean_epe_delta']:.6f}")
++    print(f"Improved/worse:   {summary['num_improved']}/{summary['num_worse']}")
++    print(f"Saved metrics to {output_dir / 'metrics.json'}")
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--manifest", required=True)
++    parser.add_argument("--checkpoint", required=True)
++    parser.add_argument("--output_dir", default="demo_fusion_outputs/eval")
++    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
++    parser.add_argument("--hidden_dim", type=int, default=None)
++    parser.add_argument("--num_visualizations", type=int, default=4)
++    args = parser.parse_args()
++    evaluate(args)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/precompute_track_guided_from_pairs.py b/scripts/precompute_track_guided_from_pairs.py
+new file mode 100644
+index 0000000..245c110
+--- /dev/null
++++ b/scripts/precompute_track_guided_from_pairs.py
+@@ -0,0 +1,221 @@
++import argparse
++import json
++import subprocess
++import sys
++from pathlib import Path
++
++
++def load_pairs(path):
++    with open(path, "r", encoding="utf-8") as f:
++        data = json.load(f)
++    return data["samples"] if isinstance(data, dict) else data
++
++
++def resolve_repo_path(path, repo_root):
++    path = Path(path)
++    if path.is_absolute():
++        return path
++    return repo_root / path
++
++
++def resolve_pair_path(path, pair_root):
++    path = Path(path)
++    if path.is_absolute():
++        return path
++    return pair_root / path
++
++
++def run_command(cmd, dry_run=False):
++    print(" ".join(str(part) for part in cmd), flush=True)
++    if dry_run:
++        return
++    subprocess.run(cmd, check=True)
++
++
++def should_skip(path, overwrite):
++    return path.exists() and not overwrite
++
++
++def precompute_sample(sample, args, pair_root, repo_root):
++    image1 = resolve_repo_path(sample["image1"], repo_root)
++    image2 = resolve_repo_path(sample["image2"], repo_root)
++    flowseek_dir = resolve_pair_path(sample["flowseek_output_dir"], pair_root)
++    sampler_dir = resolve_pair_path(sample["sampler_output_dir"], pair_root)
++    cotracker_dir = resolve_pair_path(sample["cotracker_output_dir"], pair_root)
++    alignment_dir = resolve_pair_path(sample["alignment_output_dir"], pair_root)
++    rasterizer_dir = resolve_pair_path(sample["rasterizer_output_dir"], pair_root)
++
++    for path in [flowseek_dir, sampler_dir, cotracker_dir, alignment_dir, rasterizer_dir]:
++        path.mkdir(parents=True, exist_ok=True)
++
++    flow_path = flowseek_dir / "flow.npy"
++    queries_path = sampler_dir / "queries.csv"
++    tracks_path = cotracker_dir / "tracks.npy"
++    prior_path = rasterizer_dir / "g_track.npy"
++
++    if not should_skip(flow_path, args.overwrite):
++        run_command(
++            [
++                sys.executable,
++                "demo_pair.py",
++                "--cfg",
++                args.cfg,
++                "--model",
++                args.model,
++                "--image1",
++                str(image1),
++                "--image2",
++                str(image2),
++                "--output_dir",
++                str(flowseek_dir),
++                "--max_size",
++                str(args.flowseek_max_size),
++            ],
++            args.dry_run,
++        )
++    else:
++        print(f"skip FlowSeek: {flow_path}", flush=True)
++
++    if not should_skip(queries_path, args.overwrite):
++        run_command(
++            [
++                sys.executable,
++                "demo_adaptive_sampler.py",
++                "--flow",
++                str(flow_path),
++                "--image",
++                str(image1),
++                "--output_dir",
++                str(sampler_dir),
++                "--num_points",
++                str(args.num_points),
++                "--cell_size",
++                str(args.cell_size),
++                "--min_points_per_cell",
++                str(args.min_points_per_cell),
++                "--max_points_per_cell",
++                str(args.max_points_per_cell),
++                "--min_distance",
++                str(args.min_distance),
++                "--flow_gradient_weight",
++                str(args.flow_gradient_weight),
++                "--flow_magnitude_weight",
++                str(args.flow_magnitude_weight),
++                "--image_edge_weight",
++                str(args.image_edge_weight),
++            ],
++            args.dry_run,
++        )
++    else:
++        print(f"skip sampler: {queries_path}", flush=True)
++
++    if not should_skip(tracks_path, args.overwrite):
++        run_command(
++            [
++                sys.executable,
++                "demo_cotracker_pair.py",
++                "--frames",
++                str(image1),
++                str(image2),
++                "--queries",
++                str(queries_path),
++                "--output_dir",
++                str(cotracker_dir),
++                "--max_size",
++                str(args.cotracker_max_size),
++                "--device",
++                args.device,
++            ],
++            args.dry_run,
++        )
++    else:
++        print(f"skip CoTracker: {tracks_path}", flush=True)
++
++    if not should_skip(alignment_dir / "track_flow.npy", args.overwrite):
++        run_command(
++            [
++                sys.executable,
++                "demo_track_flow_alignment.py",
++                "--flow",
++                str(flow_path),
++                "--tracks",
++                str(tracks_path),
++                "--visibility",
++                str(cotracker_dir / "visibility.npy"),
++                "--confidence",
++                str(cotracker_dir / "confidence.npy"),
++                "--image",
++                str(image1),
++                "--output_dir",
++                str(alignment_dir),
++                "--pair_index",
++                "0",
++                "--min_confidence",
++                str(args.min_confidence),
++            ],
++            args.dry_run,
++        )
++    else:
++        print(f"skip alignment: {alignment_dir / 'track_flow.npy'}", flush=True)
++
++    if not should_skip(prior_path, args.overwrite):
++        run_command(
++            [
++                sys.executable,
++                "demo_track_prior_rasterizer.py",
++                "--points",
++                str(alignment_dir / "points.npy"),
++                "--track_flow",
++                str(alignment_dir / "track_flow.npy"),
++                "--valid_mask",
++                str(alignment_dir / "valid_mask.npy"),
++                "--confidence",
++                str(alignment_dir / "confidence.npy"),
++                "--flow",
++                str(flow_path),
++                "--output_dir",
++                str(rasterizer_dir),
++            ],
++            args.dry_run,
++        )
++    else:
++        print(f"skip rasterizer: {prior_path}", flush=True)
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--pairs", required=True, help="Path to *_pairs.json from prepare_sintel_track_guided_manifest.py")
++    parser.add_argument("--cfg", default="config/eval/flowseek-T.json")
++    parser.add_argument("--model", default="weights/flowseek_T_CT.pth")
++    parser.add_argument("--device", default="cuda")
++    parser.add_argument("--max_samples", type=int, default=None)
++    parser.add_argument("--start", type=int, default=0)
++    parser.add_argument("--overwrite", action="store_true")
++    parser.add_argument("--dry_run", action="store_true")
++    parser.add_argument("--flowseek_max_size", type=int, default=384)
++    parser.add_argument("--cotracker_max_size", type=int, default=0)
++    parser.add_argument("--num_points", type=int, default=128)
++    parser.add_argument("--cell_size", type=int, default=48)
++    parser.add_argument("--min_points_per_cell", type=int, default=1)
++    parser.add_argument("--max_points_per_cell", type=int, default=6)
++    parser.add_argument("--min_distance", type=float, default=6.0)
++    parser.add_argument("--flow_gradient_weight", type=float, default=0.7)
++    parser.add_argument("--flow_magnitude_weight", type=float, default=0.3)
++    parser.add_argument("--image_edge_weight", type=float, default=0.0)
++    parser.add_argument("--min_confidence", type=float, default=0.0)
++    args = parser.parse_args()
++
++    repo_root = Path.cwd().resolve()
++    pair_path = Path(args.pairs).resolve()
++    pair_root = pair_path.parent
++    samples = load_pairs(pair_path)
++    end = len(samples) if args.max_samples is None else min(len(samples), args.start + args.max_samples)
++
++    for index in range(args.start, end):
++        sample = samples[index]
++        print(f"\n[{index + 1}/{len(samples)}] {sample.get('id', 'sample')}", flush=True)
++        precompute_sample(sample, args, pair_root, repo_root)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/prepare_sintel_track_guided_manifest.py b/scripts/prepare_sintel_track_guided_manifest.py
+new file mode 100644
+index 0000000..473f1af
+--- /dev/null
++++ b/scripts/prepare_sintel_track_guided_manifest.py
+@@ -0,0 +1,180 @@
++import argparse
++import json
++from pathlib import Path
++
++import numpy as np
++
++import sys
++
++sys.path.append(str(Path(__file__).resolve().parents[1] / "core"))
++
++from utils.frame_utils import readFlow
++
++
++def list_sintel_samples(root, split, dstype, scenes=None, max_pairs=None, start_index=0):
++    root = Path(root)
++    image_root = root / split / dstype
++    flow_root = root / split / "flow"
++    if not image_root.is_dir():
++        raise FileNotFoundError(f"Missing Sintel image directory: {image_root}")
++    if not flow_root.is_dir():
++        raise FileNotFoundError(f"Missing Sintel flow directory: {flow_root}")
++
++    scene_filter = set(scenes) if scenes else None
++    samples = []
++    seen = 0
++    for scene_dir in sorted(p for p in image_root.iterdir() if p.is_dir()):
++        scene = scene_dir.name
++        if scene_filter is not None and scene not in scene_filter:
++            continue
++
++        frames = sorted(scene_dir.glob("*.png"))
++        flows = sorted((flow_root / scene).glob("*.flo"))
++        num_pairs = min(len(frames) - 1, len(flows))
++        for index in range(num_pairs):
++            if seen < start_index:
++                seen += 1
++                continue
++            samples.append(
++                {
++                    "scene": scene,
++                    "frame_index": index,
++                    "image1": str(frames[index]),
++                    "image2": str(frames[index + 1]),
++                    "gt_flow_flo": str(flows[index]),
++                }
++            )
++            seen += 1
++            if max_pairs is not None and len(samples) >= max_pairs:
++                return samples
++    return samples
++
++
++def sample_id(sample):
++    frame_name = Path(sample["gt_flow_flo"]).stem
++    return f"{sample['scene']}_{frame_name}"
++
++
++def maybe_relative(path, base):
++    path = Path(path).resolve()
++    base = Path(base).resolve()
++    try:
++        return str(path.relative_to(base))
++    except ValueError:
++        return str(path)
++
++
++def write_json(path, data):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with open(path, "w", encoding="utf-8") as f:
++        json.dump(data, f, indent=2)
++
++
++def convert_gt_flow(sample, sample_dir):
++    flow = readFlow(sample["gt_flow_flo"])
++    if flow is None:
++        raise ValueError(f"Could not read GT flow: {sample['gt_flow_flo']}")
++    flow = flow.astype(np.float32)
++    valid = np.isfinite(flow).all(axis=2) & (np.abs(flow).max(axis=2) < 1e9)
++
++    gt_flow_path = sample_dir / "gt_flow.npy"
++    valid_path = sample_dir / "valid.npy"
++    np.save(gt_flow_path, flow)
++    np.save(valid_path, valid.astype(np.float32))
++    return gt_flow_path, valid_path
++
++
++def build_manifest(samples, output_root, manifest_path, convert_gt, make_dirs):
++    manifest_path = Path(manifest_path)
++    output_root = Path(output_root)
++    manifest_samples = []
++    pair_records = []
++
++    for sample in samples:
++        sid = sample_id(sample)
++        sample_dir = output_root / sample["scene"] / sid
++        flowseek_dir = sample_dir / "flowseek"
++        sampler_dir = sample_dir / "sampler"
++        cotracker_dir = sample_dir / "cotracker"
++        alignment_dir = sample_dir / "alignment"
++        rasterizer_dir = sample_dir / "rasterizer"
++
++        if make_dirs:
++            for path in [flowseek_dir, sampler_dir, cotracker_dir, alignment_dir, rasterizer_dir]:
++                path.mkdir(parents=True, exist_ok=True)
++
++        if convert_gt:
++            gt_flow_path, valid_path = convert_gt_flow(sample, sample_dir)
++        else:
++            gt_flow_path = sample_dir / "gt_flow.npy"
++            valid_path = sample_dir / "valid.npy"
++
++        manifest_samples.append(
++            {
++                "initial_flow": maybe_relative(flowseek_dir / "flow.npy", manifest_path.parent),
++                "track_prior": maybe_relative(rasterizer_dir / "g_track.npy", manifest_path.parent),
++                "gt_flow": maybe_relative(gt_flow_path, manifest_path.parent),
++                "valid": maybe_relative(valid_path, manifest_path.parent),
++            }
++        )
++        pair_records.append(
++            {
++                **sample,
++                "id": sid,
++                "sample_dir": maybe_relative(sample_dir, manifest_path.parent),
++                "flowseek_output_dir": maybe_relative(flowseek_dir, manifest_path.parent),
++                "sampler_output_dir": maybe_relative(sampler_dir, manifest_path.parent),
++                "cotracker_output_dir": maybe_relative(cotracker_dir, manifest_path.parent),
++                "alignment_output_dir": maybe_relative(alignment_dir, manifest_path.parent),
++                "rasterizer_output_dir": maybe_relative(rasterizer_dir, manifest_path.parent),
++            }
++        )
++
++    write_json(manifest_path, {"samples": manifest_samples})
++    pair_list_path = manifest_path.with_name(manifest_path.stem + "_pairs.json")
++    write_json(pair_list_path, {"samples": pair_records})
++    return pair_list_path, len(manifest_samples)
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--sintel_root", default="data/MPI-Sintel")
++    parser.add_argument("--split", default="training")
++    parser.add_argument("--dstype", default="clean", choices=["clean", "final"])
++    parser.add_argument("--output_root", default="precomputed/track_guided_sintel_clean")
++    parser.add_argument("--manifest", default="precomputed/track_guided_sintel_clean/manifest.json")
++    parser.add_argument("--scenes", nargs="*", default=None)
++    parser.add_argument("--start_index", type=int, default=0)
++    parser.add_argument("--max_pairs", type=int, default=None)
++    parser.add_argument("--no_convert_gt", action="store_true", help="Only plan paths; do not convert Sintel .flo files")
++    parser.add_argument("--no_make_dirs", action="store_true", help="Do not create per-sample output directories")
++    args = parser.parse_args()
++
++    samples = list_sintel_samples(
++        root=args.sintel_root,
++        split=args.split,
++        dstype=args.dstype,
++        scenes=args.scenes,
++        max_pairs=args.max_pairs,
++        start_index=args.start_index,
++    )
++    if not samples:
++        raise ValueError("No Sintel frame pairs found.")
++
++    pair_list_path, count = build_manifest(
++        samples=samples,
++        output_root=args.output_root,
++        manifest_path=args.manifest,
++        convert_gt=not args.no_convert_gt,
++        make_dirs=not args.no_make_dirs,
++    )
++
++    print(f"Prepared {count} Sintel {args.dstype} samples.")
++    print(f"Manifest: {args.manifest}")
++    print(f"Pair list: {pair_list_path}")
++    first = samples[0]
++    print(f"First pair: {first['image1']} -> {first['image2']}")
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.34.1
+

@@ -33,6 +33,8 @@ def main():
     parser.add_argument("--track_flow", required=True, help="Stage-4 track_flow.npy with shape (N, 2)")
     parser.add_argument("--valid_mask", default=None, help="Optional valid_mask.npy with shape (N,)")
     parser.add_argument("--confidence", default=None, help="Optional confidence.npy with shape (N,)")
+    parser.add_argument("--endpoint_error", default=None, help="Optional alignment endpoint_error.npy with shape (N,)")
+    parser.add_argument("--max_endpoint_error", type=float, default=None, help="Drop track points with alignment EPE above this value")
     parser.add_argument("--flow", default=None, help="Optional FlowSeek flow.npy for output shape inference")
     parser.add_argument("--image", default=None, help="Optional image for output shape inference")
     parser.add_argument("--height", type=int, default=None)
@@ -48,6 +50,10 @@ def main():
     track_flow = np.load(args.track_flow).astype(np.float32)
     valid_mask = np.load(args.valid_mask) if args.valid_mask is not None else None
     confidence = np.load(args.confidence).astype(np.float32) if args.confidence is not None else None
+    if args.endpoint_error is not None and args.max_endpoint_error is not None:
+        endpoint_error = np.load(args.endpoint_error).reshape(-1).astype(np.float32)
+        epe_mask = np.isfinite(endpoint_error) & (endpoint_error <= args.max_endpoint_error)
+        valid_mask = epe_mask if valid_mask is None else (np.asarray(valid_mask).reshape(-1).astype(bool) & epe_mask)
     image_shape = infer_shape(args)
 
     prior, stats = rasterize_track_prior(

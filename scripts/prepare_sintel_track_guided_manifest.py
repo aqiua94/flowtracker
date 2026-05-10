@@ -11,7 +11,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "core"))
 from utils.frame_utils import readFlow
 
 
-def list_sintel_samples(root, split, dstype, scenes=None, max_pairs=None, start_index=0):
+def list_sintel_samples(root, split, dstype, scenes=None, max_pairs=None, max_pairs_per_scene=None, start_index=0):
     root = Path(root)
     image_root = root / split / dstype
     flow_root = root / split / "flow"
@@ -31,10 +31,13 @@ def list_sintel_samples(root, split, dstype, scenes=None, max_pairs=None, start_
         frames = sorted(scene_dir.glob("*.png"))
         flows = sorted((flow_root / scene).glob("*.flo"))
         num_pairs = min(len(frames) - 1, len(flows))
+        scene_count = 0
         for index in range(num_pairs):
             if seen < start_index:
                 seen += 1
                 continue
+            if max_pairs_per_scene is not None and scene_count >= max_pairs_per_scene:
+                break
             samples.append(
                 {
                     "scene": scene,
@@ -45,6 +48,7 @@ def list_sintel_samples(root, split, dstype, scenes=None, max_pairs=None, start_
                 }
             )
             seen += 1
+            scene_count += 1
             if max_pairs is not None and len(samples) >= max_pairs:
                 return samples
     return samples
@@ -146,6 +150,7 @@ def main():
     parser.add_argument("--scenes", nargs="*", default=None)
     parser.add_argument("--start_index", type=int, default=0)
     parser.add_argument("--max_pairs", type=int, default=None)
+    parser.add_argument("--max_pairs_per_scene", type=int, default=None)
     parser.add_argument("--no_convert_gt", action="store_true", help="Only plan paths; do not convert Sintel .flo files")
     parser.add_argument("--no_make_dirs", action="store_true", help="Do not create per-sample output directories")
     args = parser.parse_args()
@@ -156,6 +161,7 @@ def main():
         dstype=args.dstype,
         scenes=args.scenes,
         max_pairs=args.max_pairs,
+        max_pairs_per_scene=args.max_pairs_per_scene,
         start_index=args.start_index,
     )
     if not samples:

@@ -171,11 +171,18 @@ def precompute_sample(sample, args, pair_root, repo_root):
                 str(alignment_dir / "valid_mask.npy"),
                 "--confidence",
                 str(alignment_dir / "confidence.npy"),
+                "--endpoint_error",
+                str(alignment_dir / "endpoint_error.npy"),
                 "--flow",
                 str(flow_path),
                 "--output_dir",
                 str(rasterizer_dir),
-            ],
+            ]
+            + (
+                ["--max_endpoint_error", str(args.max_alignment_epe)]
+                if args.max_alignment_epe is not None
+                else []
+            ),
             args.dry_run,
         )
     else:
@@ -203,6 +210,7 @@ def main():
     parser.add_argument("--flow_magnitude_weight", type=float, default=0.3)
     parser.add_argument("--image_edge_weight", type=float, default=0.0)
     parser.add_argument("--min_confidence", type=float, default=0.0)
+    parser.add_argument("--max_alignment_epe", type=float, default=None, help="Drop rasterized track points with alignment EPE above this value")
     args = parser.parse_args()
 
     repo_root = Path.cwd().resolve()
