@@ -787,6 +787,79 @@ L = lambda_track * L_track + lambda_smooth * L_smooth
 
 但正式实验仍建议使用带真实光流的数据集。
 
+### 7.5.1 推荐可靠性增强损失
+
+当前验证结果显示，基础 FusionNet 在训练分布内可以降低 EPE，但在低覆盖、强遮挡和大位移验证场景中容易过度修改；严格 fallback 虽能避免变差，但会让验证集全部退回 `F_0`，没有收益。因此阶段六的最优方向不是继续放大融合网络，而是让模型在训练时学会“可靠时小幅修正，不可靠时保持原 FlowSeek”。
+
+推荐训练目标：
+
+```text
+L =
+  lambda_flow          * L_flow
+  + lambda_track       * L_track
+  + lambda_smooth      * L_smooth
+  + lambda_no_harm     * L_no_harm
+  + lambda_gate_safety * L_gate_safety
+  + lambda_update_safety * L_update_safety
+```
+
+新增三类可靠性约束：
+
+- `L_no_harm`：若某个像素的 refined EPE 大于 initial EPE，则惩罚该增量，让模型优先学习“不伤害”。
+- `L_gate_safety`：根据 `confidence * visibility`、`distance_to_nearest_track` 和样本级 `prior_coverage` 构造不可靠权重，在不可靠区域压低 gate。
+- `L_update_safety`：在不可靠区域压低 `|F_refined - F_0|`，即使 gate 没完全关掉，也限制实际改变量。
+
+对应训练脚本参数：
+
+```shell
+--lambda_no_harm 0.5
+--lambda_gate_safety 0.1
+--lambda_update_safety 0.2
+--min_safe_prior_coverage 0.000225
+--gate_distance_scale 48
+```
+
+建议第一组保守实验命令：
+
+```shell
+/root/miniconda3/envs/flowseek/bin/python train_track_guided.py \
+  --manifest precomputed/track_guided_sintel_clean_multiscene_train100_attn/manifest.json \
+  --output_dir demo_fusion_outputs/sintel_clean_multiscene_train100_attn_safe_loss \
+  --steps 1000 \
+  --batch_size 1 \
+  --hidden_dim 32 \
+  --lr 1e-3 \
+  --lambda_flow 1.0 \
+  --lambda_track 0.2 \
+  --lambda_smooth 0.01 \
+  --lambda_no_harm 0.5 \
+  --lambda_gate_safety 0.1 \
+  --lambda_update_safety 0.2 \
+  --min_safe_prior_coverage 0.000225 \
+  --gate_distance_scale 48 \
+  --device cuda
+```
+
+训练后同时评估无 fallback 和严格 fallback：
+
+```shell
+/root/miniconda3/envs/flowseek/bin/python evaluate_track_guided.py \
+  --manifest precomputed/track_guided_sintel_clean_multiscene_val20_attn/manifest.json \
+  --checkpoint demo_fusion_outputs/sintel_clean_multiscene_train100_attn_safe_loss/fusion_net_smoke.pth \
+  --output_dir demo_fusion_outputs/sintel_clean_multiscene_val20_attn_safe_loss_eval \
+  --device cuda
+
+/root/miniconda3/envs/flowseek/bin/python evaluate_track_guided.py \
+  --manifest precomputed/track_guided_sintel_clean_multiscene_val20_attn/manifest.json \
+  --checkpoint demo_fusion_outputs/sintel_clean_multiscene_train100_attn_safe_loss/fusion_net_smoke.pth \
+  --output_dir demo_fusion_outputs/sintel_clean_multiscene_val20_attn_safe_loss_eval_guarded_strict \
+  --safe_refinement \
+  --min_prior_coverage 0.000225 \
+  --device cuda
+```
+
+阶段七预计算能力继续保留：`scripts/precompute_track_guided_from_pairs.py --use_trajectory_attention` 仍负责生成增强后的 `G_track`，阶段六只改变如何学习使用该 prior，而不改变阶段七的生成链路。
+
 ### 7.6 验收标准
 
 - 训练 loss 能稳定下降。
