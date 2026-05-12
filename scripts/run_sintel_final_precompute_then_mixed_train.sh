@@ -65,17 +65,36 @@ fi
 echo "==== $(date -Iseconds) build mixed clean+final manifest ====" >> "${PIPELINE_LOG}"
 "${PY}" - "${CLEAN_MANIFEST}" "${FINAL_MANIFEST}" "${MIXED_MANIFEST}" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
-clean_path, final_path, mixed_path = map(Path, sys.argv[1:])
+clean_path, final_path, mixed_path = [Path(arg).resolve() for arg in sys.argv[1:]]
 
 def load_samples(path):
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return data["samples"] if isinstance(data, dict) else data
 
-samples = load_samples(clean_path) + load_samples(final_path)
+def rebase_samples(path, mixed_dir):
+    root = path.parent
+    rebased = []
+    for sample in load_samples(path):
+        fixed = dict(sample)
+        for key, value in sample.items():
+            if not value or not isinstance(value, str):
+                continue
+            value_path = Path(value)
+            if value_path.is_absolute():
+                resolved = value_path
+            else:
+                resolved = root / value_path
+            fixed[key] = str(os.path.relpath(resolved, mixed_dir))
+        rebased.append(fixed)
+    return rebased
+
+mixed_dir = mixed_path.parent
+samples = rebase_samples(clean_path, mixed_dir) + rebase_samples(final_path, mixed_dir)
 mixed_path.parent.mkdir(parents=True, exist_ok=True)
 with open(mixed_path, "w", encoding="utf-8") as f:
     json.dump({"samples": samples}, f, indent=2)
