@@ -1,0 +1,64 @@
+{
+  "samples": [
+    {
+      "initial_flow": "alley_1/alley_1_frame_0001/flowseek/flow.npy",
+      "track_prior": "alley_1/alley_1_frame_0001/rasterizer/g_track.npy",
+      "gt_flow": "alley_1/alley_1_frame_0001/gt_flow.npy",
+      "valid": "alley_1/alley_1_frame_0001/valid.npy"
+    },
+    {
+      "initial_flow": "alley_1/alley_1_frame_0002/flowseek/flow.npy",
+      "track_prior": "alley_1/alley_1_frame_0002/rasterizer/g_track.npy",
+      "gt_flow": "alley_1/alley_1_frame_0002/gt_flow.npy",
+      "valid": "alley_1/alley_1_frame_0002/valid.npy"
+    },
+    {
+      "initial_flow": "alley_1/alley_1_frame_0003/flowseek/flow.npy",
+      "track_prior": "alley_1/alley_1_frame_0003/rasterizer/g_track.npy",
+      "gt_flow": "alley_1/alley_1_frame_0003/gt_flow.npy",
+      "valid": "alley_1/alley_1_frame_0003/valid.npy"
+    },
+    {
+      "initial_flow": "alley_1/alley_1_frame_0004/flowseek/flow.npy",
+      "track_prior": "alley_1/alley_1_frame_0004/rasterizer/g_track.npy",
+      "gt_flow": "alley_1/alley_1_frame_0004/gt_flow.npy",
+      "valid": "alley_1/alley_1_frame_0004/valid.npy"
+    },
+    {
+      "initial_flow": "alley_1/alley_1_frame_0005/flowseek/flow.npy",
+      "track_prior": "alley_1/alley_1_frame_0005/rasterizer/g_track.npy",
+      "gt_flow": "alley_1/alley_1_frame_0005/gt_flow.npy",
+      "valid": "alley_1/alley_1_frame_0005/valid.npy"
+    },
+    {
+      "initial_flow": "alley_1/alley_1_frame_0006/flowseek/flow.npy",
+      "track_prior": "alley_1/alley_1_frame_0006/rasterizer/g_track.npy",
+      "gt_flow": "alley_1/alley_1_frame_0006/gt_flow.npy",
+      "valid": "alley_1/alley_1_frame_0006/valid.npy"
+    },
+    {
+      "initial_flow": "alley_1/alley_1_frame_0007/flowseek/flow.npy",
+      "track_prior": "alley_1/alley_1_frame_0007/rasterizer/g_track.npy",
+      "gt_flow": "alley_1/alley_1_frame_0007/gt_flow.npy",
+      "valid": "alley_1/alley_1_frame_0007/valid.npy"
+    },
+    {
+      "initial_flow": "alley_1/alley_1_frame_0008/flowseek/flow.npy",
+      "track_prior": "alley_1/alley_1_frame_0008/rasterizer/g_track.npy",
+      "gt_flow": "alley_1/alley_1_frame_0008/gt_flow.npy",
+      "valid": "alley_1/alley_1_frame_0008/valid.npy"
+    },
+    {
+      "initial_flow": "alley_1/alley_1_frame_0009/flowseek/flow.npy",
+      "track_prior": "alley_1/alley_1_frame_0009/rasterizer/g_track.npy",
+      "gt_flow": "alley_1/alley_1_frame_0009/gt_flow.npy",
+      "valid": "alley_1/alley_1_frame_0009/valid.npy"
+    },
+    {
+      "initial_flow": "alley_1/alley_1_frame_0010/flowseek/flow.npy",
+      "track_prior": "alley_1/alley_1_frame_0010/rasterizer/g_track.npy",
+      "gt_flow": "alley_1/alley_1_frame_0010/gt_flow.npy",
+      "valid": "alley_1/alley_1_frame_0010/valid.npy"
+    }
+  ]
+}

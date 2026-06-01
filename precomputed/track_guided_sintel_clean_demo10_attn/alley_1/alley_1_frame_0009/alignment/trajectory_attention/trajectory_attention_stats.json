@@ -1,0 +1,10 @@
+{
+  "num_points": 512,
+  "num_valid_input": 472,
+  "num_valid_output": 472,
+  "mean_input_confidence": 1.0,
+  "mean_output_confidence": 0.8453634977340698,
+  "mean_reliability": 0.7750673294067383,
+  "mean_flow_delta": 0.487113356590271,
+  "max_flow_delta": 3.7582247257232666
+}

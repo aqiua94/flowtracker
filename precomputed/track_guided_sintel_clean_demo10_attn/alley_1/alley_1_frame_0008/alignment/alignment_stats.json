@@ -1,0 +1,12 @@
+{
+  "num_tracks": 512,
+  "num_valid": 465,
+  "valid_ratio": 0.908203125,
+  "mean_track_dx": -2.8942534923553467,
+  "mean_track_dy": 0.47197744250297546,
+  "mean_flowseek_dx": -3.0088562965393066,
+  "mean_flowseek_dy": 0.27936506271362305,
+  "mean_endpoint_error": 0.8759344220161438,
+  "median_endpoint_error": 0.5055558085441589,
+  "max_endpoint_error": 8.468602180480957
+}

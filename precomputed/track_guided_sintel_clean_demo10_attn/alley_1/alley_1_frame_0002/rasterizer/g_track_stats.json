@@ -1,0 +1,10 @@
+{
+  "height": 436,
+  "width": 1024,
+  "num_input_points": 512,
+  "num_valid_points": 472,
+  "num_rasterized_pixels": 472,
+  "mean_confidence": 0.8663744926452637,
+  "max_distance": 43.96589660644531,
+  "mean_distance": 14.679232597351074
+}
